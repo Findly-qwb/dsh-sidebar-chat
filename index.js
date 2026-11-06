@@ -52,16 +52,17 @@ const resolveRoot = (ctx, sessionId) => {
 }
 
 /**
- * Walk a directory breadth-first, collecting relative file paths.
- * Bounded by depth, entry count and a wall-clock budget so a huge tree cannot
- * stall the shared Host event loop.
+ * Walk a directory breadth-first, collecting relative file paths and the
+ * directories that could be entered next. Bounded by depth, entry count and a
+ * wall-clock budget so a huge tree cannot stall the shared Host event loop.
  * @param root - absolute directory.
  * @param needle - lowercase fragment; empty matches everything.
- * @returns relative paths, best matches first.
+ * @returns `{ files, dirs }`, each best-first; directories end with `/`.
  */
 const search = async (root, needle) => {
   const started = Date.now()
-  const found = []
+  const files = []
+  const dirs = []
   const queue = [{ dir: root, depth: 0 }]
   let visited = 0
 
@@ -79,19 +80,28 @@ const search = async (root, needle) => {
       if (entry.name.startsWith('.')) continue
       const absolute = path.join(dir, entry.name)
       if (entry.isDirectory()) {
-        if (depth < MAX_DEPTH && !SKIP_DIRS.has(entry.name)) queue.push({ dir: absolute, depth: depth + 1 })
+        if (SKIP_DIRS.has(entry.name)) continue
+        visited += 1
+        const relativeDir = `${path.relative(root, absolute).split(path.sep).join('/')}/`
+        if (needle.length === 0 || relativeDir.toLowerCase().includes(needle)) dirs.push(relativeDir)
+        if (depth < MAX_DEPTH) queue.push({ dir: absolute, depth: depth + 1 })
         continue
       }
       if (!entry.isFile()) continue
       visited += 1
       const relative = path.relative(root, absolute).split(path.sep).join('/')
       if (needle.length > 0 && !relative.toLowerCase().includes(needle)) continue
-      found.push(relative)
+      files.push(relative)
     }
   }
 
-  found.sort((a, b) => a.length - b.length || a.localeCompare(b))
-  return found.slice(0, MAX_RESULTS)
+  const best = (a, b) => a.length - b.length || a.localeCompare(b)
+  files.sort(best)
+  dirs.sort(best)
+  return {
+    files: files.slice(0, MAX_RESULTS),
+    dirs: dirs.slice(0, Math.floor(MAX_RESULTS / 2)),
+  }
 }
 
 const handle = async (ctx, req, res) => {
@@ -101,13 +111,13 @@ const handle = async (ctx, req, res) => {
     const sessionId = url.searchParams.get('session') ?? ''
     const root = resolveRoot(ctx, sessionId)
     if (root === null) {
-      sendJson(res, 200, { ok: false, error: 'no working directory for this Session', files: [] })
+      sendJson(res, 200, { ok: false, error: 'no working directory for this Session', files: [], dirs: [] })
       return
     }
-    const files = await search(root, needle)
-    sendJson(res, 200, { ok: true, root, files })
+    const { files, dirs } = await search(root, needle)
+    sendJson(res, 200, { ok: true, root, files, dirs })
   } catch (error) {
-    sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error), files: [] })
+    sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error), files: [], dirs: [] })
   }
 }
 
@@ -125,3 +135,6 @@ export function apply(ctx) {
     )
   })
 }
+
+/** Internal surface used by the regression suite; not part of the bundle API. */
+export const __test = { search }

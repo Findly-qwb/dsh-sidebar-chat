@@ -165,5 +165,40 @@ check('markdown: unterminated fence does not hang', () => {
   }
 }
 
+// Host file index: real directories, real skips.
+{
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const nodePath = await import('node:path')
+  let root = null
+  try {
+    root = await mkdtemp(nodePath.join(tmpdir(), 'dsc-index-'))
+    await mkdir(nodePath.join(root, 'src', 'deep'), { recursive: true })
+    await mkdir(nodePath.join(root, 'node_modules', 'pkg'), { recursive: true })
+    await mkdir(nodePath.join(root, '.git'), { recursive: true })
+    await writeFile(nodePath.join(root, 'a.ts'), '')
+    await writeFile(nodePath.join(root, 'src', 'b.ts'), '')
+    await writeFile(nodePath.join(root, 'node_modules', 'pkg', 'c.js'), '')
+    await writeFile(nodePath.join(root, '.git', 'd'), '')
+
+    const { __test } = await import(new URL('../index.js', import.meta.url))
+    const all = await __test.search(root, '')
+    assert(all.files.includes('a.ts') && all.files.includes('src/b.ts'), 'files: ' + all.files)
+    assert(!all.files.some((f) => f.startsWith('node_modules/')), 'vendor skipped: ' + all.files)
+    assert(all.dirs.includes('src/') && all.dirs.includes('src/deep/'), 'dirs: ' + all.dirs)
+    assert(!all.dirs.some((d) => d.startsWith('node_modules/')), 'vendor dir skipped: ' + all.dirs)
+
+    const scoped = await __test.search(root, 'src')
+    assert(scoped.files.includes('src/b.ts'), 'filtered files: ' + scoped.files)
+    assert(!scoped.files.includes('a.ts'), 'filter applied')
+    console.log('ok    host index: walks, filters, skips vendor')
+  } catch (error) {
+    failures += 1
+    console.log('FAIL  host index →', error.message)
+  } finally {
+    if (root !== null) await rm(root, { recursive: true, force: true })
+  }
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`)
 process.exit(failures === 0 ? 0 : 1)

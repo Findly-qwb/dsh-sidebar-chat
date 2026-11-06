@@ -85,6 +85,8 @@ window.__ModuleLoader__.load({
         'rail.fileLinkHint': '文件链接需要在原对话里打开——点标题栏的 ↗ 回到原对话',
         'rail.waiting': '这个会话正在等你回答',
         'rail.effort': '推理强度',
+        'rail.searchModel': '搜索模型…',
+        'rail.noModelMatch': '没有匹配的模型',
         'rail.searching': '搜索中…',
         'rail.noFileMatch': '没有匹配的文件',
         'stop.aborted': '已停止',
@@ -162,6 +164,8 @@ window.__ModuleLoader__.load({
         'rail.fileLinkHint': 'File links open in the original conversation — use ↗ in the title bar.',
         'rail.waiting': 'This Session is waiting for your answer',
         'rail.effort': 'Reasoning effort',
+        'rail.searchModel': 'Search models…',
+        'rail.noModelMatch': 'No matching model',
         'rail.searching': 'Searching…',
         'rail.noFileMatch': 'No matching file',
         'stop.aborted': 'Stopped',
@@ -1025,6 +1029,7 @@ window.__ModuleLoader__.load({
       image: icon(['M3 5h18v14H3z', 'M8.5 10.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z', 'M21 15l-5-5L5 19']),
       braces: icon(['M8 3H7a2 2 0 0 0-2 2v4l-2 3 2 3v4a2 2 0 0 0 2 2h1', 'M16 3h1a2 2 0 0 1 2 2v4l2 3-2 3v4a2 2 0 0 1-2 2h-1']),
       fileText: icon(['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z', 'M14 3v5h5', 'M9 13h6', 'M9 17h4']),
+      folder: icon(['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z']),
       code: icon(['M9 18l-6-6 6-6', 'M15 6l6 6-6 6']),
       stop: icon(['M7 7h10v10H7z']),
     }
@@ -1558,9 +1563,9 @@ window.__ModuleLoader__.load({
 }
 .dsc-model:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
 .dsc-menu {
-  position: absolute; bottom: calc(100% + 6px); right: 10px;
-  min-width: 220px; max-width: 320px; max-height: 280px; overflow-y: auto;
-  padding: 4px; z-index: 5;
+  position: fixed;
+  overflow-y: auto;
+  padding: 4px; z-index: 8;
   background: var(--dsw-alias-bg-overlay);
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.14);
@@ -1572,12 +1577,42 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-primary); font: inherit;
 }
 .dsc-menu-item:hover, .dsc-menu-item.is-active { background: var(--dsw-alias-bg-layer-2); }
-.dsc-menu-name { font-size: 12.5px; }
+.dsc-menu-search {
+  position: sticky; top: -4px; z-index: 1;
+  width: calc(100% - 0px); padding: 5px 9px; margin-bottom: 2px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 12px; line-height: 18px;
+  outline: none;
+}
+.dsc-menu-search:focus { border-color: var(--dsw-alias-border-l2); }
+.dsc-menu-empty {
+  padding: 10px 9px; font-size: 11.5px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsc-menu-group {
+  padding: 7px 9px 3px;
+  font-size: 10.5px; letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-secondary);
+  opacity: 0.85;
+}
+.dsc-menu-item { flex-direction: row; align-items: center; gap: 8px; }
+.dsc-menu-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dsc-menu-check { flex: none; display: inline-flex; color: var(--dsw-alias-brand-primary); }
+.dsc-menu-check svg { width: 13px; height: 13px; }
 .dsc-menu-sub { font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .dsc-menu-effort {
+  position: sticky; bottom: -4px;
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-  margin-top: 4px; padding: 7px 9px 3px;
+  margin: 4px -4px -4px; padding: 8px 12px;
+  background: var(--dsw-alias-bg-overlay);
   border-top: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 0 0 10px 10px;
 }
 .dsc-menu-effort-label { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-right: 2px; }
 .dsc-effort {
@@ -1588,6 +1623,7 @@ window.__ModuleLoader__.load({
 }
 .dsc-effort:hover:not(.is-active) { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .dsc-effort.is-active { background: var(--dsw-alias-brand-primary); border-color: transparent; color: #fff; }
+.dsc-effort.is-static { cursor: default; }
 .dsc-composer.is-drop {
   border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);
   background: color-mix(in srgb, var(--dsw-alias-brand-primary) 7%, var(--dsw-alias-bg-layer-1));
@@ -2186,6 +2222,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
       const [modelOpen, setModelOpen] = useState(false)
+      const [modelQuery, setModelQuery] = useState('')
       const [modelBusy, setModelBusy] = useState(false)
       const [mention, setMention] = useState(null)
       const [dropActive, setDropActive] = useState(false)
@@ -2193,6 +2230,8 @@ window.__ModuleLoader__.load({
       const areaRef = useRef(null)
       const fileRef = useRef(null)
       const wrapRef = useRef(null)
+      const menuRef = useRef(null)
+      const modelBtnRef = useRef(null)
 
       // Model seat: the shipped per-session directory, the same one the main
       // composer reads, so a switch here is visible there and vice versa.
@@ -2228,13 +2267,56 @@ window.__ModuleLoader__.load({
         return rows
       }, [directoryState])
 
-      const effortIds = (model) => {
-        const efforts = model?.reasoning?.efforts
-        if (!Array.isArray(efforts)) return []
-        return efforts
-          .map((entry) => (typeof entry === 'string' ? entry : entry?.id))
-          .filter((id) => typeof id === 'string' && id.length > 0)
+      /**
+       * The effort levels for one model come from the catalog, not from the
+       * directory snapshot: `modelDirectories.catalog.reasoningFor()` returns
+       * `{ defaultEffort?, efforts: [{ id, name }] }` for the Host generation.
+       * The snapshot only carries the retained effort's display name.
+       */
+      const effortLevels = (row) => {
+        const model = row?.model
+        if (model === null || typeof model !== 'object') return { levels: [], defaultEffort: undefined }
+        const read = (value) => {
+          if (!Array.isArray(value)) return []
+          return value
+            .map((entry) => {
+              if (typeof entry === 'string') return { id: entry, name: entry }
+              const id = entry?.id
+              if (typeof id !== 'string' || id.length === 0) return null
+              return { id, name: typeof entry?.name === 'string' && entry.name.length > 0 ? entry.name : id }
+            })
+            .filter((entry) => entry !== null)
+        }
+        try {
+          const catalog = modelDirsRef?.catalog
+          const reasoning = catalog?.reasoningFor?.({ provider: row.provider, model: model.id })
+          const levels = read(reasoning?.efforts)
+          if (levels.length > 0) return { levels, defaultEffort: reasoning?.defaultEffort }
+        } catch {}
+        for (const list of [model.reasoning?.efforts, model.reasoning?.levels, model.reasoningEfforts, model.efforts]) {
+          const levels = read(list)
+          if (levels.length > 0) return { levels, defaultEffort: model.reasoning?.defaultEffort }
+        }
+        return { levels: [], defaultEffort: undefined }
       }
+
+      const modelGroups = useMemo(() => {
+        const byProvider = new Map()
+        for (const row of modelRows) {
+          const key = String(row.provider ?? '').trim()
+          if (key.length === 0) continue
+          let group = byProvider.get(key)
+          if (group === undefined) {
+            group = { provider: key, rows: [], seen: new Set() }
+            byProvider.set(key, group)
+          }
+          const modelId = String(row.model?.id ?? '')
+          if (group.seen.has(modelId)) continue
+          group.seen.add(modelId)
+          group.rows.push(row)
+        }
+        return [...byProvider.values()]
+      }, [modelRows])
 
       const currentRow = useMemo(
         () =>
@@ -2243,7 +2325,26 @@ window.__ModuleLoader__.load({
           ) ?? null,
         [modelRows, currentModel],
       )
-      const currentEfforts = effortIds(currentRow?.model)
+      const filteredGroups = useMemo(() => {
+        const query = modelQuery.trim().toLowerCase()
+        if (query.length === 0) return modelGroups
+        return modelGroups
+          .map((group) => ({
+            provider: group.provider,
+            rows: group.rows.filter((row) => {
+              const id = String(row.model?.id ?? '').toLowerCase()
+              const label = String(row.model?.label ?? '').toLowerCase()
+              return id.includes(query) || label.includes(query) || group.provider.toLowerCase().includes(query)
+            }),
+          }))
+          .filter((group) => group.rows.length > 0)
+      }, [modelGroups, modelQuery])
+
+      const currentLevels = useMemo(
+        () => effortLevels(currentRow),
+        [currentRow, directoryState],
+      )
+      const currentEfforts = currentLevels.levels
       const currentEffort = typeof currentModel?.reasoningEffort === 'string' ? currentModel.reasoningEffort : ''
 
       const closeMenus = useCallback(() => {
@@ -2251,20 +2352,51 @@ window.__ModuleLoader__.load({
         setMention(null)
       }, [])
 
+      const [menuBox, setMenuBox] = useState(null)
+      useEffect(() => {
+        if (!modelOpen) {
+          setMenuBox(null)
+          setModelQuery('')
+          return undefined
+        }
+        const rect = wrapRef.current?.getBoundingClientRect?.()
+        if (rect === undefined) return undefined
+        const width = Math.min(320, Math.max(220, rect.width - 24))
+        setMenuBox({
+          left: Math.max(12, Math.min(rect.right - width - 12, window.innerWidth - width - 12)),
+          bottom: window.innerHeight - rect.top + 6,
+          width,
+          maxHeight: Math.min(360, Math.max(180, rect.top - 24)),
+        })
+        return undefined
+      }, [modelOpen])
+
       useEffect(() => {
         if (!modelOpen) return undefined
+        const target = (event) => (event.target instanceof Node ? event.target : null)
         const onDown = (event) => {
-          if (wrapRef.current !== null && wrapRef.current.contains(event.target)) return
+          const node = target(event)
+          if (node === null) {
+            setModelOpen(false)
+            return
+          }
+          // Both the popup and the button that opens it are "inside": the button
+          // toggles on click, and closing here would fight that.
+          if (menuRef.current !== null && menuRef.current.contains(node)) return
+          if (modelBtnRef.current !== null && modelBtnRef.current.contains(node)) return
           setModelOpen(false)
         }
         const onKey = (event) => {
           if (event.key === 'Escape') setModelOpen(false)
         }
-        document.addEventListener('pointerdown', onDown)
-        document.addEventListener('keydown', onKey)
+        // Capture: the conversation panel and the sidebar handle their own
+        // pointerdown and stop it, so a bubble-phase listener never sees a
+        // click that lands outside this composer.
+        document.addEventListener('pointerdown', onDown, true)
+        document.addEventListener('keydown', onKey, true)
         return () => {
-          document.removeEventListener('pointerdown', onDown)
-          document.removeEventListener('keydown', onKey)
+          document.removeEventListener('pointerdown', onDown, true)
+          document.removeEventListener('keydown', onKey, true)
         }
       }, [modelOpen])
 
@@ -2282,14 +2414,14 @@ window.__ModuleLoader__.load({
             const selection = { provider: row.provider, model: row.model.id }
             // The effort is per model: keep it only when the new model offers it,
             // otherwise fall back to that model's own default.
-            const efforts = effortIds(row.model)
-            if (efforts.length > 0) {
-              const preferred = row.model?.reasoning?.defaultEffort
+            const { levels, defaultEffort } = effortLevels(row)
+            if (levels.length > 0) {
+              const ids = levels.map((level) => level.id)
               const keep = currentModel !== null && typeof currentModel.reasoningEffort === 'string' ? currentModel.reasoningEffort : ''
               const chosen =
-                (keep.length > 0 && efforts.includes(keep) ? keep : '') ||
-                (typeof preferred === 'string' && efforts.includes(preferred) ? preferred : '') ||
-                efforts[0]
+                (keep.length > 0 && ids.includes(keep) ? keep : '') ||
+                (typeof defaultEffort === 'string' && ids.includes(defaultEffort) ? defaultEffort : '') ||
+                ids[0]
               if (chosen.length > 0) selection.reasoningEffort = chosen
             }
             const result = await directory.select?.(selection)
@@ -2387,9 +2519,11 @@ window.__ModuleLoader__.load({
       // A fragment of one character is enough to ask the Host; an empty one
       // would scan the whole tree on every `@`, so the local paths answer that.
       const [remotePaths, setRemotePaths] = useState([])
+      const [remoteDirs, setRemoteDirs] = useState([])
       useEffect(() => {
         if (mention === null || mention.query.length === 0) {
           setRemotePaths([])
+          setRemoteDirs([])
           return undefined
         }
         const controller = new AbortController()
@@ -2402,7 +2536,10 @@ window.__ModuleLoader__.load({
             const response = await fetch(url, { signal: controller.signal, credentials: 'same-origin' })
             if (!response.ok) return
             const payload = await response.json()
-            if (payload !== null && payload.ok === true && Array.isArray(payload.files)) setRemotePaths(payload.files)
+            if (payload !== null && payload.ok === true) {
+              if (Array.isArray(payload.files)) setRemotePaths(payload.files)
+              if (Array.isArray(payload.dirs)) setRemoteDirs(payload.dirs)
+            }
           } catch {
           } finally {
             setRemoteLoading(false)
@@ -2425,15 +2562,29 @@ window.__ModuleLoader__.load({
           seen.add(candidate)
           merged.push(candidate)
         }
+        for (const candidate of remoteDirs) push(candidate)
         for (const candidate of paths) push(candidate)
         for (const candidate of remotePaths) push(candidate)
         return merged.slice(0, 8)
-      }, [mention === null ? '' : mention.query, paths, remotePaths])
+      }, [mention === null ? '' : mention.query, paths, remotePaths, remoteDirs])
 
       const mentionIndex = mention === null ? 0 : Math.min(mention.index ?? 0, Math.max(0, mentionItems.length - 1))
 
       const applyMention = (path) => {
         if (mention === null || typeof path !== 'string') return
+        if (path.endsWith('/')) {
+          const entered = `${draft.slice(0, mention.start)}@${path}${draft.slice(mention.end)}`
+          const caret = mention.start + 1 + path.length
+          setDraft(entered)
+          setMention({ start: mention.start, end: caret, query: path, index: 0 })
+          window.requestAnimationFrame(() => {
+            const element = areaRef.current
+            if (element === null) return
+            element.focus()
+            element.setSelectionRange(caret, caret)
+          })
+          return
+        }
         const next = `${draft.slice(0, mention.start)}@${path} ${draft.slice(mention.end)}`
         setDraft(next)
         setMention(null)
@@ -2545,7 +2696,8 @@ window.__ModuleLoader__.load({
                   ? h('div', { className: 'dsc-mention-empty' }, remoteLoading ? t('rail.searching') : t('rail.noFileMatch'))
                   : null,
                 mentionItems.map((path, index) => {
-                  const base = path.split('/').pop() ?? path
+                  const isDir = path.endsWith('/')
+                  const base = isDir ? path : path.split('/').pop() ?? path
                   const dir = path.slice(0, path.length - base.length)
                   return h(
                     'button',
@@ -2557,7 +2709,7 @@ window.__ModuleLoader__.load({
                         setMention((previous) => (previous === null ? previous : { ...previous, index })),
                       onClick: () => applyMention(path),
                     },
-                    h('span', { className: 'dsc-mention-icon', 'aria-hidden': true }, fileGlyph(base)),
+                    h('span', { className: 'dsc-mention-icon', 'aria-hidden': true }, isDir ? ICONS.folder : fileGlyph(base)),
                     h(
                       'span',
                       { className: 'dsc-mention-path' },
@@ -2614,13 +2766,14 @@ window.__ModuleLoader__.load({
                 ? h(
                     'button',
                     {
+                      ref: modelBtnRef,
                       type: 'button',
                       className: 'dsc-model',
                       title: t('rail.model'),
                       onClick: () => setModelOpen((open) => !open),
                       disabled: modelBusy || disabled,
                     },
-                    currentModel.model,
+                    currentEffort.length > 0 ? `${currentModel.model} · ${currentEffort}` : currentModel.model,
                   )
                 : null,
               busy ? h('span', { className: 'dsc-hint' }, t('rail.sending')) : null,
@@ -2664,37 +2817,70 @@ window.__ModuleLoader__.load({
         modelOpen && modelRows.length > 0
           ? h(
               'div',
-              { className: 'dsc-menu' },
-              modelRows.map((row) =>
+              {
+                ref: menuRef,
+                className: 'dsc-menu',
+                style:
+                  menuBox === null
+                    ? undefined
+                    : { left: `${menuBox.left}px`, bottom: `${menuBox.bottom}px`, width: `${menuBox.width}px`, maxHeight: `${menuBox.maxHeight}px` },
+              },
+              h('input', {
+                className: 'dsc-menu-search',
+                value: modelQuery,
+                placeholder: t('rail.searchModel'),
+                onChange: (event) => setModelQuery(event.target.value),
+                onPointerDown: (event) => event.stopPropagation(),
+              }),
+              filteredGroups.length === 0
+                ? h('div', { className: 'dsc-menu-empty' }, t('rail.noModelMatch'))
+                : null,
+              filteredGroups.map((group) =>
                 h(
-                  'button',
-                  {
-                    type: 'button',
-                    key: `${row.provider}:${row.model.id}`,
-                    className: `dsc-menu-item${currentModel !== null && currentModel.provider === row.provider && currentModel.model === row.model.id ? ' is-active' : ''}`,
-                    onClick: () => pickModel(row),
-                    disabled: modelBusy,
-                  },
-                  h('span', { className: 'dsc-menu-name' }, row.model.id),
-                  h('span', { className: 'dsc-menu-sub' }, row.model.label ?? row.provider),
+                  Fragment,
+                  { key: group.provider },
+                  h('div', { className: 'dsc-menu-group' }, group.provider),
+                  group.rows.map((row) => {
+                    const active =
+                      currentModel !== null &&
+                      currentModel.provider === row.provider &&
+                      currentModel.model === row.model.id
+                    return h(
+                      'button',
+                      {
+                        type: 'button',
+                        key: `${row.provider}:${row.model.id}`,
+                        className: `dsc-menu-item${active ? ' is-active' : ''}`,
+                        onClick: () => pickModel(row),
+                        disabled: modelBusy,
+                        title: `${row.provider} / ${row.model.id}`,
+                      },
+                      h('span', { className: 'dsc-menu-name' }, row.model.label ?? row.model.id),
+                      active ? h('span', { className: 'dsc-menu-check' }, ICONS.check) : null,
+                    )
+                  }),
                 ),
               ),
-              currentEfforts.length > 0
+              currentEfforts.length > 0 || currentEffort.length > 0
                 ? h(
                     'div',
                     { className: 'dsc-menu-effort' },
                     h('span', { className: 'dsc-menu-effort-label' }, t('rail.effort')),
-                    currentEfforts.map((effortId) =>
+                    currentEfforts.length === 0 && currentEffort.length > 0
+                      ? h('span', { className: 'dsc-effort is-active is-static' }, currentEffort)
+                      : null,
+                    currentEfforts.map((level) =>
                       h(
                         'button',
                         {
                           type: 'button',
-                          key: effortId,
-                          className: `dsc-effort${effortId === currentEffort ? ' is-active' : ''}`,
+                          key: level.id,
+                          className: `dsc-effort${level.id === currentEffort ? ' is-active' : ''}`,
                           disabled: modelBusy,
-                          onClick: () => pickEffort(effortId),
+                          title: level.id,
+                          onClick: () => pickEffort(level.id),
                         },
-                        effortId,
+                        level.name,
                       ),
                     ),
                   )
