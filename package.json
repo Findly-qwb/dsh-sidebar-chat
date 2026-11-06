@@ -3,8 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Open any Session in a rail beside the workspace and keep talking to it without leaving the Session you are in.",
+  "description": "Open any DeepSeek Harness Session in a floating dock beside the work you are doing: read it, reply to it, and keep the Session you are in running.",
+  "license": "MIT",
   "icon": "icon.svg",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "sidebar",
+    "floating",
+    "popup",
+    "chat"
+  ],
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -13,11 +24,14 @@
     "./icon": "./icon.svg"
   },
   "files": [
-    "index.js",
+    "LICENSE",
+    "README.md",
     "client.js",
     "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "index.js",
+    "package.json",
+    "locale/*.json"
   ],
   "dsh": {
     "bundle": {
@@ -31,5 +45,9 @@
         "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
+  },
+  "scripts": {
+    "check": "node --check client.js",
+    "test": "node tests/regression.mjs"
   }
 }

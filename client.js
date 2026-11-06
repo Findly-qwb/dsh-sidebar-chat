@@ -82,6 +82,16 @@ window.__ModuleLoader__.load({
         'dock.hint': '右键会话打开',
         'dock.emptyTitle': '还没有打开的会话',
         'dock.emptyHint': '在左侧会话列表的「⋯」菜单里选「弹窗打开」',
+        'rail.fileLinkHint': '文件链接需要在原对话里打开——点标题栏的 ↗ 回到原对话',
+        'rail.waiting': '这个会话正在等你回答',
+        'rail.effort': '推理强度',
+        'rail.searching': '搜索中…',
+        'rail.noFileMatch': '没有匹配的文件',
+        'stop.aborted': '已停止',
+        'stop.interrupted': '已中断',
+        'stop.blocked': '已被阻止',
+        'stop.max-tokens': '达到长度上限',
+        'stop.forked': '已分叉',
         'todo.title': '任务',
         'todo.done': '{count} 已完成',
         'todo.active': '{count} 进行中',
@@ -149,6 +159,16 @@ window.__ModuleLoader__.load({
         'dock.hint': 'Open a Session from its menu',
         'dock.emptyTitle': 'No conversation open yet',
         'dock.emptyHint': 'Pick "Open in popup" from a Session menu',
+        'rail.fileLinkHint': 'File links open in the original conversation — use ↗ in the title bar.',
+        'rail.waiting': 'This Session is waiting for your answer',
+        'rail.effort': 'Reasoning effort',
+        'rail.searching': 'Searching…',
+        'rail.noFileMatch': 'No matching file',
+        'stop.aborted': 'Stopped',
+        'stop.interrupted': 'Interrupted',
+        'stop.blocked': 'Blocked',
+        'stop.max-tokens': 'Hit the length limit',
+        'stop.forked': 'Forked',
         'todo.title': 'Tasks',
         'todo.done': '{count} done',
         'todo.active': '{count} in progress',
@@ -188,6 +208,20 @@ window.__ModuleLoader__.load({
       return template.replace(/\{(\w+)\}/g, (match, name) => (name in vars ? String(vars[name]) : match))
     }
 
+    // ── transient notice ────────────────────────────────────────────────────
+    let notice = null
+    let noticeTimer = 0
+    const showNotice = (text) => {
+      notice = { text, id: Date.now() }
+      for (const fn of listeners) fn()
+      window.clearTimeout(noticeTimer)
+      noticeTimer = window.setTimeout(() => {
+        notice = null
+        for (const fn of listeners) fn()
+      }, 3600)
+    }
+    const getNotice = () => notice
+
     // ── rail state ──────────────────────────────────────────────────────────
     const listeners = new Set()
     const readDock = () => {
@@ -200,13 +234,40 @@ window.__ModuleLoader__.load({
     }
     const savedDock = readDock()
 
+    const clampPoint = (value, max) => Math.min(Math.max(value, 8), Math.max(8, max))
+
+    // A saved position belongs to the window it was dragged in. On a smaller
+    // window it would sit outside the viewport, which reads as "the ball is
+    // gone" — so restore it clamped instead of trusting it verbatim. `hidden`
+    // is a per-session mood, not a saved state: a fresh launch always shows it.
+    const restoreBall = () => {
+      const ball = savedDock?.ball
+      if (!ball || typeof ball.x !== 'number' || typeof ball.y !== 'number') return null
+      return {
+        x: clampPoint(ball.x, window.innerWidth - BALL_SIZE - 8),
+        y: clampPoint(ball.y, window.innerHeight - BALL_SIZE - 8),
+      }
+    }
+    const restorePanel = () => {
+      const panel = savedDock?.panel
+      if (!panel || typeof panel.x !== 'number' || typeof panel.y !== 'number') return null
+      const w = Math.min(Math.max(PANEL_MIN_WIDTH, Number(panel.w) || PANEL_WIDTH), Math.max(PANEL_MIN_WIDTH, window.innerWidth - 16))
+      const h = Math.min(Math.max(PANEL_MIN_HEIGHT, Number(panel.h) || PANEL_HEIGHT), Math.max(PANEL_MIN_HEIGHT, window.innerHeight - 16))
+      return {
+        x: clampPoint(panel.x, window.innerWidth - w - 8),
+        y: clampPoint(panel.y, window.innerHeight - h - 8),
+        w,
+        h,
+      }
+    }
+
     let state = {
-      mode: savedDock?.mode === 'panel' || savedDock?.mode === 'hidden' ? savedDock.mode : 'ball',
+      mode: savedDock?.mode === 'panel' ? 'panel' : 'ball',
       tabs: [],
       active: null,
       openError: null,
-      ball: savedDock?.ball ?? null,
-      panel: savedDock?.panel ?? null,
+      ball: restoreBall(),
+      panel: restorePanel(),
     }
 
     const getState = () => state
@@ -219,6 +280,7 @@ window.__ModuleLoader__.load({
       for (const fn of listeners) fn()
     }
     const useStore = () => useSyncExternalStore(subscribe, getState, getState)
+    const useNotice = () => useSyncExternalStore(subscribe, getNotice, getNotice)
 
     // One retained reference per open tab: the rail and the main surface share
     // the same Session generation, so neither can diverge from the other.
@@ -308,7 +370,67 @@ window.__ModuleLoader__.load({
       return parts.join('\n').trim()
     }
 
+    const firstString = (...values) => {
+      for (const value of values) {
+        if (typeof value === 'string' && value.trim().length > 0) return value
+      }
+      return ''
+    }
+
+    /**
+     * Extract the one line worth showing for a call. Generic keys lose to a
+     * tool-specific one: a question's text beats its `description`, a pattern
+     * beats a path, and so on.
+     */
+    const summarizeArgs = (name, args) => {
+      if (args === null || typeof args !== 'object') return ''
+      switch (name) {
+        case 'ask_user_question': {
+          const questions = Array.isArray(args.questions) ? args.questions : []
+          return firstString(questions[0]?.question, args.question, args.description)
+        }
+        case 'todo_write': {
+          const todos = Array.isArray(args.todos) ? args.todos : []
+          if (todos.length === 0) return ''
+          const done = todos.filter((item) => item?.status === 'completed').length
+          return `${done}/${todos.length}`
+        }
+        case 'read':
+        case 'read_image':
+        case 'write':
+        case 'edit':
+          return firstString(args.path, args.file_path, args.filePath, args.image_path, args.target)
+        case 'grep':
+        case 'glob':
+          return firstString(args.pattern, args.query, args.glob)
+        case 'web_search':
+          return firstString(args.query, args.q)
+        case 'web_fetch':
+          return firstString(args.url, args.href)
+        case 'bash':
+        case 'pwsh':
+          return firstString(args.command, args.script)
+        case 'subagent':
+        case 'send_message':
+        case 'spawn_teammate':
+          return firstString(args.description, args.task, args.message, args.prompt)
+        case 'present':
+          return firstString(args.title, args.name, args.summary)
+        default:
+          return firstString(
+            args.description,
+            args.command,
+            args.query,
+            args.path,
+            args.prompt,
+            args.name,
+            args.title,
+          )
+      }
+    }
+
     const toolSummary = (part) => {
+      const name = typeof part?.name === 'string' ? part.name : ''
       let args = part?.arguments
       if (typeof args === 'string') {
         try {
@@ -317,15 +439,11 @@ window.__ModuleLoader__.load({
           args = undefined
         }
       }
-      const candidate =
-        args && typeof args === 'object'
-          ? args.description ?? args.command ?? args.query ?? args.path ?? args.prompt ?? args.name
-          : typeof part?.arguments === 'string'
-            ? part.arguments
-            : ''
-      const detail = typeof candidate === 'string' ? candidate.replace(/\s+/g, ' ').slice(0, 96) : ''
+      const candidate = summarizeArgs(name, args)
+      const fallback = typeof part?.arguments === 'string' && args === undefined ? part.arguments : ''
+      const detail = (candidate || fallback).replace(/\s+/g, ' ').slice(0, 96)
       return {
-        name: typeof part?.name === 'string' ? part.name : t('rail.tool'),
+        name: name.length > 0 ? name : t('rail.tool'),
         detail,
         callId: typeof part?.id === 'string' ? part.id : undefined,
       }
@@ -400,7 +518,9 @@ window.__ModuleLoader__.load({
       const flush = () => {
         if (pending === null) return
         const text = pending.texts.join('\n\n').trim()
-        if (text.length > 0 || pending.tools.length > 0 || typeof pending.error === 'string') {
+        const hasTodos = Array.isArray(pending.todos) && pending.todos.length > 0
+        const hasStop = typeof pending.stopReason === 'string'
+        if (text.length > 0 || pending.tools.length > 0 || typeof pending.error === 'string' || hasTodos || hasStop) {
           out.push({
             kind: 'assistant',
             id: pending.id,
@@ -411,6 +531,7 @@ window.__ModuleLoader__.load({
             durationMs: pending.durationMs,
             todos: pending.todos,
             error: pending.error,
+            stopReason: pending.stopReason,
           })
         }
         pending = null
@@ -429,6 +550,15 @@ window.__ModuleLoader__.load({
         if (event.type === 'turn/end') {
           const reason = event.data?.reason
           const failure = reason?.kind === 'error' ? reason.error?.message : undefined
+          // Every other terminal reason is a state worth naming; silently ending
+          // the block would look like the turn simply stopped mid-thought.
+          const stopped = reason?.kind
+          if (typeof stopped === 'string' && stopped !== 'completed' && stopped !== 'error') {
+            if (pending === null) {
+              pending = { id: `e${event.seq}`, texts: [], segments: [], tools: [], durationMs: undefined }
+            }
+            pending.stopReason = stopped
+          }
           if (typeof failure === 'string' && failure.length > 0) {
             // A failed turn may have produced no assistant message at all, and
             // the failure is the only thing worth showing for it.
@@ -596,8 +726,25 @@ window.__ModuleLoader__.load({
         } else if (match[4] !== undefined || match[5] !== undefined) {
           nodes.push(h('em', { key }, match[4] ?? match[5]))
         } else if (match[6] !== undefined) {
+          const href = match[7]
           nodes.push(
-            h('a', { key, href: match[7], target: '_blank', rel: 'noreferrer noopener' }, match[6]),
+            h(
+              'a',
+              {
+                key,
+                href,
+                target: '_blank',
+                rel: 'noreferrer noopener',
+                onClick: (event) => {
+                  // A file reference cannot be resolved here: the rail has no
+                  // file opener, and pretending otherwise is worse than saying so.
+                  if (/^https?:\/\//i.test(href)) return
+                  event.preventDefault()
+                  showNotice(t('rail.fileLinkHint'))
+                },
+              },
+              match[6],
+            ),
           )
         }
         last = match.index + match[0].length
@@ -798,7 +945,7 @@ window.__ModuleLoader__.load({
       })
 
     const PATH_PATTERN =
-      /(?:^|[\s`'"(（\[])((?:\.{0,2}\/)?[\w@%+.,\-]+(?:\/[\w@%+.,\-]+)*\.[A-Za-z0-9]{1,6})/g
+      /(?:^|[\s`'"(（\[])((?:\.{0,2}\/)?[\w@%+.,\-]+(?:\/[\w@%+.,\-]+)*\.[A-Za-z0-9]{1,12})/g
 
     /**
      * Paths the conversation has already named, newest first: an `@` suggestion
@@ -814,6 +961,9 @@ window.__ModuleLoader__.load({
         while ((match = PATH_PATTERN.exec(text)) !== null) {
           const candidate = match[1].replace(/^[.,(（[\]@]+/, '').replace(/[.,]+$/, '')
           if (candidate.length < 3 || candidate.length > 160) continue
+          // `0.62` is a decimal, not a file named `0` with extension `.62`.
+          if (!/[A-Za-z]/.test(candidate)) continue
+          if (/^\d+(\.\d+)+$/.test(candidate)) continue
           if (seen.has(candidate)) seen.delete(candidate)
           seen.set(candidate, candidate)
         }
@@ -862,6 +1012,20 @@ window.__ModuleLoader__.load({
       send: icon(['M12 19V5', 'M6 11l6-6 6 6']),
       plus: icon(['M12 5v14', 'M5 12h14']),
       list: icon(['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3 6h.01', 'M3 12h.01', 'M3 18h.01']),
+      user: icon(['M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2', 'M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z']),
+      terminal: icon(['M4 17l6-6-6-6', 'M12 19h8']),
+      file: icon(['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z', 'M14 3v5h5']),
+      pencil: icon(['M12 20h9', 'M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z']),
+      search: icon(['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z', 'M21 21l-4.3-4.3']),
+      globe: icon(['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z', 'M3 12h18', 'M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z']),
+      users: icon(['M17 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', 'M9.5 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z', 'M22 21v-2a4 4 0 0 0-3-3.9']),
+      check: icon(['M20 6 9 17l-5-5']),
+      help: icon(['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z', 'M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4', 'M12 17h.01']),
+      wrench: icon(['M14.7 6.3a4 4 0 0 0 5 5L20 21H4l8.7-9.7a4 4 0 0 0 2-5z']),
+      image: icon(['M3 5h18v14H3z', 'M8.5 10.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z', 'M21 15l-5-5L5 19']),
+      braces: icon(['M8 3H7a2 2 0 0 0-2 2v4l-2 3 2 3v4a2 2 0 0 0 2 2h1', 'M16 3h1a2 2 0 0 1 2 2v4l2 3-2 3v4a2 2 0 0 1-2 2h-1']),
+      fileText: icon(['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z', 'M14 3v5h5', 'M9 13h6', 'M9 17h4']),
+      code: icon(['M9 18l-6-6 6-6', 'M15 6l6 6-6 6']),
       stop: icon(['M7 7h10v10H7z']),
     }
 
@@ -949,6 +1113,18 @@ window.__ModuleLoader__.load({
    right alignment without assuming anything about the host's positioning
    context, and the rail keeps its own width in a variable so the inline
    fallback and the stylesheet agree. */
+.dsc-notice {
+  position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%);
+  max-width: min(520px, 82vw);
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-overlay);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px; line-height: 1.55;
+  pointer-events: auto; z-index: 6;
+}
 .dsc-layer {
   position: fixed; inset: 0;
   pointer-events: none;
@@ -1079,10 +1255,31 @@ window.__ModuleLoader__.load({
 /* A widened panel should not stretch prose to 1200px: the thread keeps the
    Chat's own reading width and centres itself in whatever room it has. */
 .dsc-thread { display: flex; flex-direction: column; width: 100%; max-width: 760px; margin: 0 auto; }
-.dsc-msg { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
-.dsc-msg-user { align-items: flex-end; }
+.dsc-msg { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
+.dsc-msg.is-group-start { margin-top: 14px; }
+.dsc-msg-user { flex-direction: row-reverse; }
+.dsc-msg-assistant .dsc-msg-body { flex: 1 1 auto; }
+.dsc-msg-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dsc-msg-user .dsc-msg-body { align-items: flex-end; }
+.dsc-msg-body > .dsc-process { align-self: flex-start; }
+.dsc-avatar {
+  flex: none; width: 26px; height: 26px; margin-top: 2px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.dsc-avatar svg { width: 14px; height: 14px; }
+.dsc-avatar-ai {
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-brand-primary);
+}
+.dsc-avatar-user { background: var(--dsw-alias-brand-primary); color: #fff; }
+.dsc-avatar-spacer { background: transparent; }
 .dsc-msg-user .dsc-bubble {
-  max-width: 88%; overflow-wrap: anywhere; padding: 8px 11px; border-radius: 12px;
+  max-width: 88%;
+  background: var(--dsw-alias-bg-layer-2);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, var(--dsw-alias-bg-base));
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, transparent); overflow-wrap: anywhere; padding: 8px 11px; border-radius: 12px;
   background: var(--dsw-alias-bg-layer-2);
   white-space: pre-wrap; word-break: break-word; line-height: 1.6;
 }
@@ -1129,6 +1326,8 @@ window.__ModuleLoader__.load({
 .dsc-tool-name { flex: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; opacity: 0.9; }
 .dsc-tool-detail { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-tool-chevron { order: -1; flex: none; display: inline-flex; transition: transform 0.12s ease; opacity: 0.75; }
+.dsc-tool-icon { order: -1; flex: none; display: inline-flex; opacity: 0.65; }
+.dsc-tool-icon svg { width: 13px; height: 13px; }
 .dsc-tool-chevron.is-open { transform: rotate(90deg); }
 .dsc-tool-output {
   margin: 2px 0 4px; padding: 8px 10px;
@@ -1142,6 +1341,25 @@ window.__ModuleLoader__.load({
   max-height: 220px; overflow: auto;
 }
 .dsc-msg-actions { display: flex; justify-content: flex-start; gap: 6px; margin-top: 2px; }
+.dsc-badges { display: flex; gap: 6px; margin-top: 6px; }
+.dsc-badge {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px; line-height: 18px;
+}
+.dsc-waiting {
+  display: flex; align-items: center; gap: 10px;
+  flex: none;
+  margin: 0 16px 6px; padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 28%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, var(--dsw-alias-bg-base));
+  font-size: 12px; line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+.dsc-waiting > span { flex: 1 1 auto; min-width: 0; }
 .dsc-turn-error {
   margin-top: 10px; padding: 10px 12px;
   border: 1px solid var(--dsw-alias-border-l1);
@@ -1165,7 +1383,7 @@ window.__ModuleLoader__.load({
 }
 .dsc-seg-tools { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
 .dsc-seg-text:not(:last-child),
-.dsc-seg-tools:not(:last-child) { margin-bottom: 12px; }
+.dsc-seg-tools:not(:last-child) { margin-bottom: 10px; }
 .dsc-action {
   padding: 1px 7px; border-radius: 6px;
   border: 1px solid var(--dsw-alias-border-l1);
@@ -1356,6 +1574,28 @@ window.__ModuleLoader__.load({
 .dsc-menu-item:hover, .dsc-menu-item.is-active { background: var(--dsw-alias-bg-layer-2); }
 .dsc-menu-name { font-size: 12.5px; }
 .dsc-menu-sub { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dsc-menu-effort {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 4px; padding: 7px 9px 3px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+.dsc-menu-effort-label { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-right: 2px; }
+.dsc-effort {
+  padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: transparent; color: var(--dsw-alias-label-secondary);
+  font: inherit; font-size: 11px; line-height: 16px; cursor: pointer;
+}
+.dsc-effort:hover:not(.is-active) { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.dsc-effort.is-active { background: var(--dsw-alias-brand-primary); border-color: transparent; color: #fff; }
+.dsc-composer.is-drop {
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 7%, var(--dsw-alias-bg-layer-1));
+}
+.dsc-mention-empty {
+  padding: 8px 9px; font-size: 11.5px;
+  color: var(--dsw-alias-label-secondary);
+}
 .dsc-attach-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 2px 6px; }
 .dsc-attach {
   position: relative; width: 56px; height: 56px;
@@ -1377,13 +1617,20 @@ window.__ModuleLoader__.load({
   border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px;
 }
 .dsc-mention-item {
-  display: block; width: 100%; padding: 4px 7px;
+  width: 100%; padding: 4px 7px;
   border: 0; border-radius: 6px; background: transparent; text-align: left;
   color: var(--dsw-alias-label-primary); cursor: pointer;
   font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.dsc-mention-item:hover { background: var(--dsw-alias-bg-base); }
+.dsc-mention-item:hover,
+.dsc-mention-item.is-active { background: var(--dsw-alias-bg-base); }
+.dsc-mention-item { display: flex; align-items: center; gap: 7px; width: 100%; }
+.dsc-mention-icon { flex: none; display: inline-flex; opacity: 0.5; }
+.dsc-mention-icon svg { width: 13px; height: 13px; }
+.dsc-mention-path { min-width: 0; display: inline-flex; align-items: baseline; overflow: hidden; }
+.dsc-mention-dir { color: var(--dsw-alias-label-secondary); opacity: 0.75; }
+.dsc-mention-base { color: var(--dsw-alias-label-primary); }
 .dsc-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .dsc-send {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1453,7 +1700,16 @@ window.__ModuleLoader__.load({
 .dsc-md-tableScroll td:first-child { padding-left: 12px; }
 .dsc-md-tableScroll th:last-child,
 .dsc-md-tableScroll td:last-child { padding-right: 12px; }
-.dsc-md .dsc-codeblock { margin: 16px 0; }
+/* The shipped markdown rhythm is tuned for a full-width column; in a 400px
+   dock it reads as airy. Tighten the block spacing one notch. */
+.dsc-md p { margin: 10px 0; }
+.dsc-md :where(ul, ol) { margin: 10px 0; }
+.dsc-md :where(h1, h2, h3) { margin: 20px 0 10px; }
+.dsc-md :where(h4, h5, h6) { margin: 12px 0 8px; }
+.dsc-md blockquote { margin: 10px 0 0; }
+.dsc-md hr { margin: 20px 0; }
+.dsc-md pre { margin: 10px 0; }
+.dsc-md .dsc-codeblock { margin: 10px 0; }
 .dsc-md .dsc-codeblock pre { margin: 0; }
 .dsc-md :where(ul,ol) input[type="checkbox"] { margin: 0 8px 0 0; accent-color: var(--dsw-alias-label-secondary); }
 `
@@ -1616,23 +1872,57 @@ window.__ModuleLoader__.load({
       )
     }
 
-    const UserBlock = ({ message, session }) => {
+    const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'ico', 'bmp', 'avif'])
+    const DATA_EXT = new Set(['json', 'yaml', 'yml', 'toml', 'ini', 'lock', 'csv', 'tsv'])
+    const TEXT_EXT = new Set(['md', 'txt', 'rst', 'log'])
+    const CODE_EXT = new Set([
+      'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'go', 'rs', 'java', 'kt', 'swift',
+      'c', 'cc', 'cpp', 'h', 'hpp', 'cs', 'rb', 'php', 'gd', 'sh', 'zsh', 'bash', 'ps1',
+      'css', 'scss', 'less', 'html', 'htm', 'xml', 'vue', 'svelte', 'sql', 'lua', 'dart',
+    ])
+
+    /** A file's icon follows its extension; anything unknown stays a plain file. */
+    const fileGlyph = (name) => {
+      const dot = name.lastIndexOf('.')
+      const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+      if (IMAGE_EXT.has(ext)) return ICONS.image
+      if (DATA_EXT.has(ext)) return ICONS.braces
+      if (TEXT_EXT.has(ext)) return ICONS.fileText
+      if (CODE_EXT.has(ext)) return ICONS.code
+      return ICONS.file
+    }
+
+    const Avatar = ({ kind, show }) =>
+      show === false
+        ? h('div', { className: 'dsc-avatar dsc-avatar-spacer', 'aria-hidden': true })
+        : h(
+            'div',
+            { className: `dsc-avatar dsc-avatar-${kind}`, 'aria-hidden': true },
+            kind === 'user' ? ICONS.user : ICONS.chat,
+          )
+
+    const UserBlock = ({ message, session, showAvatar }) => {
       const images = Array.isArray(message.images) ? message.images : []
       return h(
         'div',
-        { className: 'dsc-msg dsc-msg-user' },
-        images.length > 0
-          ? h(
-              'div',
-              { className: 'dsc-imgs' },
-              images.map((attachment, index) =>
-                h(AttachmentImage, { key: `${message.id}-img-${index}`, attachment, session }),
-              ),
-            )
-          : null,
-        message.text.length > 0
-          ? h('div', { className: 'dsc-bubble' }, h('div', { className: 'dsc-text' }, message.text))
-          : null,
+        { className: `dsc-msg dsc-msg-user${showAvatar ? ' is-group-start' : ''}` },
+        h(Avatar, { kind: 'user', show: showAvatar }),
+        h(
+          'div',
+          { className: 'dsc-msg-body' },
+          images.length > 0
+            ? h(
+                'div',
+                { className: 'dsc-imgs' },
+                images.map((attachment, index) =>
+                  h(AttachmentImage, { key: `${message.id}-img-${index}`, attachment, session }),
+                ),
+              )
+            : null,
+          message.text.length > 0
+            ? h('div', { className: 'dsc-bubble' }, h('div', { className: 'dsc-text' }, message.text))
+            : null,
+        ),
       )
     }
 
@@ -1665,6 +1955,33 @@ window.__ModuleLoader__.load({
      * and the output it produced opens below only when asked for. A page of
      * command output is not something to read by scrolling past.
      */
+    const toolGlyph = (kind) => {
+      switch (kind) {
+        case 'commands':
+        case 'code':
+          return ICONS.terminal
+        case 'read':
+        case 'readImage':
+          return ICONS.file
+        case 'write':
+        case 'edit':
+          return ICONS.pencil
+        case 'search':
+          return ICONS.search
+        case 'webSearch':
+        case 'webFetch':
+          return ICONS.globe
+        case 'subagents':
+          return ICONS.users
+        case 'plan':
+          return ICONS.check
+        case 'questions':
+          return ICONS.help
+        default:
+          return ICONS.wrench
+      }
+    }
+
     const ToolEntry = ({ tool, id }) => {
       const [open, setOpen] = useState(false)
       const output = typeof tool.result === 'string' ? tool.result : ''
@@ -1686,6 +2003,7 @@ window.__ModuleLoader__.load({
           openable
             ? h('span', { className: `dsc-tool-chevron${open ? ' is-open' : ''}` }, ICONS.chevronRight)
             : null,
+          h('span', { className: 'dsc-tool-icon', 'aria-hidden': true }, toolGlyph(tool.kind)),
         ),
         open && openable ? h('pre', { className: 'dsc-tool-output' }, output) : null,
       )
@@ -1749,7 +2067,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    const AssistantBlock = ({ message, running }) => {
+    const AssistantBlock = ({ message, running, showAvatar }) => {
       const [openTools, setOpenTools] = useState(false)
       const [hover, setHover] = useState(false)
       const [copied, setCopied] = useState(false)
@@ -1794,11 +2112,14 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         {
-          className: 'dsc-msg dsc-msg-assistant',
+          className: `dsc-msg dsc-msg-assistant${showAvatar ? ' is-group-start' : ''}`,
           onMouseEnter: () => setHover(true),
           onMouseLeave: () => setHover(false),
         },
 
+        h(
+          'div',
+          { className: 'dsc-msg-body dsc-msg-body-full' },
         // The summary row opens at the head of the turn, so expanding it reveals
         // the work directly beneath the control that was pressed.
         interactive || duration.length > 0
@@ -1827,6 +2148,9 @@ window.__ModuleLoader__.load({
           : message.text.length > 0
             ? h('div', { className: 'dsc-bubble' }, h('div', { className: 'dsc-md' }, renderMarkdown(message.text, message.id)))
             : null,
+        typeof message.stopReason === 'string'
+          ? h('div', { className: 'dsc-badges' }, h('span', { className: 'dsc-badge' }, t(`stop.${message.stopReason}`)))
+          : null,
         typeof message.error === 'string' && message.error.length > 0
           ? h(
               'div',
@@ -1852,6 +2176,7 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
+        ),
       )
     }
 
@@ -1863,6 +2188,8 @@ window.__ModuleLoader__.load({
       const [modelOpen, setModelOpen] = useState(false)
       const [modelBusy, setModelBusy] = useState(false)
       const [mention, setMention] = useState(null)
+      const [dropActive, setDropActive] = useState(false)
+      const [remoteLoading, setRemoteLoading] = useState(false)
       const areaRef = useRef(null)
       const fileRef = useRef(null)
       const wrapRef = useRef(null)
@@ -1901,6 +2228,24 @@ window.__ModuleLoader__.load({
         return rows
       }, [directoryState])
 
+      const effortIds = (model) => {
+        const efforts = model?.reasoning?.efforts
+        if (!Array.isArray(efforts)) return []
+        return efforts
+          .map((entry) => (typeof entry === 'string' ? entry : entry?.id))
+          .filter((id) => typeof id === 'string' && id.length > 0)
+      }
+
+      const currentRow = useMemo(
+        () =>
+          modelRows.find(
+            (row) => currentModel !== null && currentModel.provider === row.provider && currentModel.model === row.model.id,
+          ) ?? null,
+        [modelRows, currentModel],
+      )
+      const currentEfforts = effortIds(currentRow?.model)
+      const currentEffort = typeof currentModel?.reasoningEffort === 'string' ? currentModel.reasoningEffort : ''
+
       const closeMenus = useCallback(() => {
         setModelOpen(false)
         setMention(null)
@@ -1935,8 +2280,17 @@ window.__ModuleLoader__.load({
               return
             }
             const selection = { provider: row.provider, model: row.model.id }
-            if (currentModel !== null && typeof currentModel.reasoningEffort === 'string') {
-              selection.reasoningEffort = currentModel.reasoningEffort
+            // The effort is per model: keep it only when the new model offers it,
+            // otherwise fall back to that model's own default.
+            const efforts = effortIds(row.model)
+            if (efforts.length > 0) {
+              const preferred = row.model?.reasoning?.defaultEffort
+              const keep = currentModel !== null && typeof currentModel.reasoningEffort === 'string' ? currentModel.reasoningEffort : ''
+              const chosen =
+                (keep.length > 0 && efforts.includes(keep) ? keep : '') ||
+                (typeof preferred === 'string' && efforts.includes(preferred) ? preferred : '') ||
+                efforts[0]
+              if (chosen.length > 0) selection.reasoningEffort = chosen
             }
             const result = await directory.select?.(selection)
             if (result !== undefined && result !== null && result.ok === false) {
@@ -1951,6 +2305,31 @@ window.__ModuleLoader__.load({
           }
         },
         [directory, currentModel, modelBusy],
+      )
+
+      const pickEffort = useCallback(
+        async (effortId) => {
+          if (directory === null || currentModel === null || modelBusy) return
+          if (typeof effortId !== 'string' || effortId.length === 0) return
+          if (effortId === currentEffort) return
+          setModelBusy(true)
+          setError(null)
+          try {
+            const result = await directory.select?.({
+              provider: currentModel.provider,
+              model: currentModel.model,
+              reasoningEffort: effortId,
+            })
+            if (result !== undefined && result !== null && result.ok === false) {
+              setError(t('error.model', { message: result.error?.message ?? result.error?.code ?? 'unknown' }))
+            }
+          } catch (cause) {
+            setError(t('error.model', { message: cause?.message ?? String(cause) }))
+          } finally {
+            setModelBusy(false)
+          }
+        },
+        [directory, currentModel, currentEffort, modelBusy],
       )
 
       const onPickFiles = useCallback(async (event) => {
@@ -2005,8 +2384,56 @@ window.__ModuleLoader__.load({
         }
       }, [draft, images, busy, disabled, session])
 
+      // A fragment of one character is enough to ask the Host; an empty one
+      // would scan the whole tree on every `@`, so the local paths answer that.
+      const [remotePaths, setRemotePaths] = useState([])
+      useEffect(() => {
+        if (mention === null || mention.query.length === 0) {
+          setRemotePaths([])
+          return undefined
+        }
+        const controller = new AbortController()
+        setRemoteLoading(true)
+        const timer = window.setTimeout(async () => {
+          try {
+            const url = new URL('sidebar-chat/files', document.baseURI)
+            url.searchParams.set('q', mention.query)
+            if (typeof sessionId === 'string' && sessionId.length > 0) url.searchParams.set('session', sessionId)
+            const response = await fetch(url, { signal: controller.signal, credentials: 'same-origin' })
+            if (!response.ok) return
+            const payload = await response.json()
+            if (payload !== null && payload.ok === true && Array.isArray(payload.files)) setRemotePaths(payload.files)
+          } catch {
+          } finally {
+            setRemoteLoading(false)
+          }
+        }, 180)
+        return () => {
+          controller.abort()
+          window.clearTimeout(timer)
+          setRemoteLoading(false)
+        }
+      }, [mention === null ? '' : mention.query, sessionId])
+
+      const mentionItems = useMemo(() => {
+        const query = mention === null ? '' : mention.query.toLowerCase()
+        const merged = []
+        const seen = new Set()
+        const push = (candidate) => {
+          if (typeof candidate !== 'string' || candidate.length === 0 || seen.has(candidate)) return
+          if (query.length > 0 && !candidate.toLowerCase().includes(query)) return
+          seen.add(candidate)
+          merged.push(candidate)
+        }
+        for (const candidate of paths) push(candidate)
+        for (const candidate of remotePaths) push(candidate)
+        return merged.slice(0, 8)
+      }, [mention === null ? '' : mention.query, paths, remotePaths])
+
+      const mentionIndex = mention === null ? 0 : Math.min(mention.index ?? 0, Math.max(0, mentionItems.length - 1))
+
       const applyMention = (path) => {
-        if (mention === null) return
+        if (mention === null || typeof path !== 'string') return
         const next = `${draft.slice(0, mention.start)}@${path} ${draft.slice(mention.end)}`
         setDraft(next)
         setMention(null)
@@ -2021,13 +2448,11 @@ window.__ModuleLoader__.load({
         const caret = event.target.selectionStart ?? value.length
         const before = value.slice(0, caret)
         const match = before.match(/(?:^|\s)@([^\s@]*)$/)
-        if (match === null || paths.length === 0) {
+        if (match === null) {
           setMention(null)
           return
         }
-        const query = match[1].toLowerCase()
-        const items = paths.filter((path) => path.toLowerCase().includes(query)).slice(0, 8)
-        setMention(items.length > 0 ? { start: caret - match[1].length - 1, end: caret, items } : null)
+        setMention({ start: caret - match[1].length - 1, end: caret, query: match[1], index: 0 })
       }
 
       const onKeyDown = (event) => {
@@ -2035,6 +2460,29 @@ window.__ModuleLoader__.load({
           event.preventDefault()
           closeMenus()
           return
+        }
+        if (mention !== null && mentionItems.length > 0) {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault()
+            setMention((previous) =>
+              previous === null ? previous : { ...previous, index: (previous.index + 1) % previous.items.length },
+            )
+            return
+          }
+          if (event.key === 'ArrowUp') {
+            event.preventDefault()
+            setMention((previous) =>
+              previous === null
+                ? previous
+                : { ...previous, index: (previous.index - 1 + previous.items.length) % previous.items.length },
+            )
+            return
+          }
+          if (event.key === 'Enter' && !event.shiftKey && event.nativeEvent?.isComposing !== true) {
+            event.preventDefault()
+            applyMention(mentionItems[mentionIndex] ?? mentionItems[0])
+            return
+          }
         }
         if (event.key !== 'Enter' || event.shiftKey) return
         if (event.nativeEvent?.isComposing === true) return
@@ -2050,7 +2498,22 @@ window.__ModuleLoader__.load({
         error ? h('div', { className: 'dsc-error' }, error) : null,
         h(
           'div',
-          { className: 'dsc-composer' },
+          {
+            className: `dsc-composer${dropActive ? ' is-drop' : ''}`,
+            onDragOver: (event) => {
+              if (!event.dataTransfer?.types?.includes('Files')) return
+              event.preventDefault()
+              setDropActive(true)
+            },
+            onDragLeave: () => setDropActive(false),
+            onDrop: (event) => {
+              const files = Array.from(event.dataTransfer?.files ?? [])
+              if (files.length === 0) return
+              event.preventDefault()
+              setDropActive(false)
+              onPickFiles({ target: { files, value: '' } }).catch(() => {})
+            },
+          },
           images.length > 0
             ? h(
                 'div',
@@ -2078,13 +2541,31 @@ window.__ModuleLoader__.load({
             ? h(
                 'div',
                 { className: 'dsc-mention' },
-                mention.items.map((path) =>
-                  h(
+                mentionItems.length === 0
+                  ? h('div', { className: 'dsc-mention-empty' }, remoteLoading ? t('rail.searching') : t('rail.noFileMatch'))
+                  : null,
+                mentionItems.map((path, index) => {
+                  const base = path.split('/').pop() ?? path
+                  const dir = path.slice(0, path.length - base.length)
+                  return h(
                     'button',
-                    { type: 'button', key: path, className: 'dsc-mention-item', onClick: () => applyMention(path) },
-                    path,
-                  ),
-                ),
+                    {
+                      type: 'button',
+                      key: path,
+                      className: `dsc-mention-item${index === mentionIndex ? ' is-active' : ''}`,
+                      onMouseEnter: () =>
+                        setMention((previous) => (previous === null ? previous : { ...previous, index })),
+                      onClick: () => applyMention(path),
+                    },
+                    h('span', { className: 'dsc-mention-icon', 'aria-hidden': true }, fileGlyph(base)),
+                    h(
+                      'span',
+                      { className: 'dsc-mention-path' },
+                      dir.length > 0 ? h('span', { className: 'dsc-mention-dir' }, dir) : null,
+                      h('span', { className: 'dsc-mention-base' }, base),
+                    ),
+                  )
+                }),
               )
             : null,
           h('textarea', {
@@ -2198,6 +2679,26 @@ window.__ModuleLoader__.load({
                   h('span', { className: 'dsc-menu-sub' }, row.model.label ?? row.provider),
                 ),
               ),
+              currentEfforts.length > 0
+                ? h(
+                    'div',
+                    { className: 'dsc-menu-effort' },
+                    h('span', { className: 'dsc-menu-effort-label' }, t('rail.effort')),
+                    currentEfforts.map((effortId) =>
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          key: effortId,
+                          className: `dsc-effort${effortId === currentEffort ? ' is-active' : ''}`,
+                          disabled: modelBusy,
+                          onClick: () => pickEffort(effortId),
+                        },
+                        effortId,
+                      ),
+                    ),
+                  )
+                : null,
             )
           : null,
       )
@@ -2264,6 +2765,18 @@ window.__ModuleLoader__.load({
         [messages],
       )
       const paths = useMemo(() => collectPaths(messages), [messages])
+      // A question tool whose result never arrived is a turn parked on the user.
+      // Only the latest assistant block can be in that state.
+      const waiting = useMemo(() => {
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          const message = messages[index]
+          if (message.kind !== 'assistant') continue
+          const tools = message.tools ?? []
+          const last = tools[tools.length - 1]
+          return last !== undefined && last.name === 'ask_user_question' && last.result === undefined
+        }
+        return false
+      }, [messages])
       const running = snapshot?.running === true
       const openState = snapshot?.openState
 
@@ -2337,11 +2850,14 @@ window.__ModuleLoader__.load({
           messages.length > MAX_MESSAGES
             ? h('div', { className: 'dsc-note' }, t('rail.truncated', { count: MAX_MESSAGES }))
             : null,
-          visible.map((message) =>
-            message.kind === 'user'
-              ? h(UserBlock, { key: message.id, message, session })
-              : h(AssistantBlock, { key: message.id, message, running }),
-          ),
+          visible.map((message, index) => {
+            // One avatar per run of turns by the same speaker: the column stays
+            // reserved so the text does not shift left on continuation rows.
+            const showAvatar = index === 0 || visible[index - 1].kind !== message.kind
+            return message.kind === 'user'
+              ? h(UserBlock, { key: message.id, message, session, showAvatar })
+              : h(AssistantBlock, { key: message.id, message, running, showAvatar })
+          }),
           ),
           ),
           atBottom
@@ -2352,6 +2868,28 @@ window.__ModuleLoader__.load({
                 ICONS.chevronDown,
               ),
         ),
+        waiting
+          ? h(
+              'div',
+              { className: 'dsc-waiting' },
+              h('span', null, t('rail.waiting')),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsc-action',
+                  onClick: () => {
+                    try {
+                      uiWorkspaceRef?.openSession?.(sessionId)
+                    } catch (cause) {
+                      report('openSession', cause)
+                    }
+                  },
+                },
+                t('rail.toMain'),
+              ),
+            )
+          : null,
         h(Composer, {
           session: session,
           sessionId,
@@ -2364,6 +2902,7 @@ window.__ModuleLoader__.load({
 
     const Dock = () => {
       const current = useStore()
+      const currentNotice = useNotice()
       const [dragging, setDragging] = useState(null)
       const panelRef = useRef(null)
       const ballRef = useRef(null)
@@ -2671,6 +3210,7 @@ window.__ModuleLoader__.load({
         { className: 'dsc-layer', 'data-plugin': 'dsh-sidebar-chat' },
         h('style', null, CSS),
         shell,
+        currentNotice === null ? null : h('div', { className: 'dsc-notice' }, currentNotice.text),
       )
     }
 
@@ -2722,7 +3262,7 @@ window.__ModuleLoader__.load({
             {
               name: 'shell.overlay',
               id: 'sidebar-chat.panel',
-              order: 900,
+              order: 1600,
               locale: NS,
             },
             Dock,
