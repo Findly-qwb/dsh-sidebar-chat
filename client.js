@@ -23,8 +23,9 @@ window.__ModuleLoader__.load({
     const PANEL_MIN_WIDTH = 320
     const PANEL_MIN_HEIGHT = 360
     const MAX_MESSAGES = 400
-    const MAX_IMAGES = 4
+    const MAX_ATTACHMENTS = 4
     const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+    const MAX_FILE_BYTES = 24 * 1024 * 1024
     const CODE_COLLAPSE_LINES = 14
 
     // ── copy ────────────────────────────────────────────────────────────────
@@ -50,6 +51,9 @@ window.__ModuleLoader__.load({
         'rail.removeImage': '移除这张图片',
         'error.model': '切换模型失败：{message}',
         'error.turnTitle': '处理失败',
+        'error.fileTooLarge': '{name} 超过 {size} MB，没有添加',
+        'error.fileUnsupported': '当前环境不支持添加文件，只能添加图片',
+        'error.upload': '附件上传失败：{message}',
         'error.turnFailed': '本轮运行失败',
         'process.done.thinking': '已完成分析',
         'process.done.read': '已读取文件',
@@ -82,11 +86,20 @@ window.__ModuleLoader__.load({
         'dock.hint': '右键会话打开',
         'dock.emptyTitle': '还没有打开的会话',
         'dock.emptyHint': '在左侧会话列表的「⋯」菜单里选「弹窗打开」',
+        'dock.switch': '切换会话',
+        'dock.switchSearch': '搜索会话…',
+        'dock.switchEmpty': '没有匹配的会话',
+        'dock.switchHint': '点标题栏的标题可以切换会话',
         'rail.fileLinkHint': '文件链接需要在原对话里打开——点标题栏的 ↗ 回到原对话',
         'rail.waiting': '这个会话正在等你回答',
         'rail.effort': '推理强度',
         'rail.searchModel': '搜索模型…',
         'rail.noModelMatch': '没有匹配的模型',
+        'rail.unread': '有新回复',
+        'rail.pinned': '已固定',
+        'rail.recent': '最近使用',
+        'rail.pin': '固定到顶部',
+        'rail.unpin': '取消固定',
         'rail.searching': '搜索中…',
         'rail.noFileMatch': '没有匹配的文件',
         'stop.aborted': '已停止',
@@ -129,6 +142,9 @@ window.__ModuleLoader__.load({
         'rail.removeImage': 'Remove this image',
         'error.model': 'Could not switch model: {message}',
         'error.turnTitle': 'Run failed',
+        'error.fileTooLarge': '{name} is over {size} MB and was skipped',
+        'error.fileUnsupported': 'This build cannot attach files — images only',
+        'error.upload': 'Attachment upload failed: {message}',
         'error.turnFailed': 'This turn failed:',
         'process.done.thinking': 'Finished analysis',
         'process.done.read': 'Read files',
@@ -161,11 +177,20 @@ window.__ModuleLoader__.load({
         'dock.hint': 'Open a Session from its menu',
         'dock.emptyTitle': 'No conversation open yet',
         'dock.emptyHint': 'Pick "Open in popup" from a Session menu',
+        'dock.switch': 'Switch Session',
+        'dock.switchSearch': 'Search Sessions…',
+        'dock.switchEmpty': 'No matching Session',
+        'dock.switchHint': 'Click the title to switch Session',
         'rail.fileLinkHint': 'File links open in the original conversation — use ↗ in the title bar.',
         'rail.waiting': 'This Session is waiting for your answer',
         'rail.effort': 'Reasoning effort',
         'rail.searchModel': 'Search models…',
         'rail.noModelMatch': 'No matching model',
+        'rail.unread': 'New reply',
+        'rail.pinned': 'Pinned',
+        'rail.recent': 'Recent',
+        'rail.pin': 'Pin to top',
+        'rail.unpin': 'Unpin',
         'rail.searching': 'Searching…',
         'rail.noFileMatch': 'No matching file',
         'stop.aborted': 'Stopped',
@@ -191,6 +216,7 @@ window.__ModuleLoader__.load({
 
     // ── plugin context ──────────────────────────────────────────────────────
     let scopeRef = null
+    let fileUploadRef = null
     let uiWorkspaceRef = null
     let modelDirsRef = null
 
@@ -274,6 +300,38 @@ window.__ModuleLoader__.load({
       panel: restorePanel(),
     }
 
+    // ── model preferences ───────────────────────────────────────────────────
+    // Pinned models and the last few used ones, keyed `provider\u0000model`.
+    const PIN_KEY = 'dsh-sidebar-chat.pins'
+    const RECENT_KEY = 'dsh-sidebar-chat.recent'
+    const RECENT_MAX = 5
+
+    const modelKey = (provider, model) => `${provider}\u0000${model}`
+
+    const readJson = (key, fallback) => {
+      try {
+        const raw = JSON.parse(window.localStorage.getItem(key) ?? 'null')
+        return raw === null ? fallback : raw
+      } catch {
+        return fallback
+      }
+    }
+
+    const writeJson = (key, value) => {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value))
+      } catch {}
+    }
+
+    const readPins = () => {
+      const raw = readJson(PIN_KEY, [])
+      return new Set(Array.isArray(raw) ? raw.filter((item) => typeof item === 'string') : [])
+    }
+    const readRecent = () => {
+      const raw = readJson(RECENT_KEY, [])
+      return Array.isArray(raw) ? raw.filter((item) => typeof item === 'string') : []
+    }
+
     const getState = () => state
     const subscribe = (fn) => {
       listeners.add(fn)
@@ -315,6 +373,141 @@ window.__ModuleLoader__.load({
       try {
         reference.release()
       } catch {}
+    }
+
+    // ── unread ──────────────────────────────────────────────────────────────
+    // A mark is the seq of the last reply the reader has actually seen. Anything
+    // newer in a tab that is not on screen is unread.
+    const readMarks = new Map()
+
+    const lastSeqOf = (entries) => {
+      let last = 0
+      for (const entry of entries) {
+        const seq = entry?.event?.seq
+        if (typeof seq === 'number' && seq > last) last = seq
+      }
+      return last
+    }
+
+    const countRepliesAfter = (entries, mark) => {
+      let count = 0
+      for (const entry of entries) {
+        const event = entry?.event
+        if (event?.type !== 'assistant/message') continue
+        if (typeof event.seq === 'number' && event.seq > mark) count += 1
+      }
+      return count
+    }
+
+    const snapshotEntries = (reference) => {
+      try {
+        return reference?.binding?.eventSource?.getSnapshot?.()?.entries ?? []
+      } catch {
+        return []
+      }
+    }
+
+    /**
+     * Unread reply counts for every retained tab.
+     * @param activeSessionId - the tab currently on screen.
+     * @param viewed - whether that tab is actually visible to the reader.
+     * @param tabIds - the open tabs, used to re-subscribe when the set changes.
+     * @returns a map of sessionId to unread reply count.
+     */
+    const useUnread = (activeSessionId, viewed, tabIds) => {
+      const [counts, setCounts] = useState({})
+      useEffect(() => {
+        let alive = true
+        const compute = () => {
+          if (!alive) return
+          const next = {}
+          for (const [sessionId, reference] of references) {
+            const entries = snapshotEntries(reference)
+            const last = lastSeqOf(entries)
+            if (viewed && sessionId === activeSessionId) {
+              readMarks.set(sessionId, last)
+              continue
+            }
+            const mark = readMarks.get(sessionId) ?? 0
+            const count = countRepliesAfter(entries, mark)
+            if (count > 0) next[sessionId] = count
+          }
+          setCounts(next)
+        }
+        const offs = []
+        for (const reference of references.values()) {
+          try {
+            const source = reference?.binding?.eventSource
+            if (typeof source?.subscribe === 'function') {
+              const off = source.subscribe(compute)
+              if (typeof off === 'function') offs.push(off)
+            }
+          } catch {}
+        }
+        compute()
+        return () => {
+          alive = false
+          for (const off of offs) {
+            try {
+              off()
+            } catch {}
+          }
+        }
+      }, [activeSessionId, viewed, tabIds])
+      return counts
+    }
+
+    /**
+     * The shipped session list, newest first, for the switcher.
+     * @returns `{ sessionId, title }` rows the rail can open.
+     */
+    const useSessionChoices = (open, query) => {
+      const [rows, setRows] = useState([])
+      useEffect(() => {
+        if (!open) return undefined
+        const list = scopeRef.sessions?.list
+        if (list === undefined || typeof list.getSnapshot !== 'function') return undefined
+        const update = () => {
+          let snapshot
+          try {
+            snapshot = list.getSnapshot()
+          } catch {
+            return
+          }
+          const byId = snapshot?.byId ?? {}
+          const ids = Array.isArray(snapshot?.ids) ? snapshot.ids : Object.keys(byId)
+          const next = []
+          for (const sessionId of ids) {
+            const summary = byId[sessionId]
+            if (summary === undefined) continue
+            if (summary.origin === 'subagent') continue
+            const title = summary.displayTitle ?? summary.title ?? ''
+            next.push({
+              sessionId,
+              title: typeof title === 'string' ? title : '',
+              updatedAt: typeof summary.updatedAt === 'number' ? summary.updatedAt : 0,
+            })
+          }
+          // The list arrives in Host order; the switcher reads newest first.
+          next.sort((left, right) => right.updatedAt - left.updatedAt)
+          setRows(next)
+        }
+        update()
+        const off = typeof list.subscribe === 'function' ? list.subscribe(update) : undefined
+        return () => {
+          try {
+            if (typeof off === 'function') off()
+          } catch {}
+        }
+      }, [open])
+
+      return useMemo(() => {
+        const needle = query.trim().toLowerCase()
+        if (needle.length === 0) return rows.slice(0, 40)
+        return rows
+          .filter((row) => row.title.toLowerCase().includes(needle) || row.sessionId.includes(needle))
+          .slice(0, 40)
+      }, [rows, query])
     }
 
     const openSession = (sessionId, title) => {
@@ -1030,6 +1223,7 @@ window.__ModuleLoader__.load({
       braces: icon(['M8 3H7a2 2 0 0 0-2 2v4l-2 3 2 3v4a2 2 0 0 0 2 2h1', 'M16 3h1a2 2 0 0 1 2 2v4l2 3-2 3v4a2 2 0 0 1-2 2h-1']),
       fileText: icon(['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z', 'M14 3v5h5', 'M9 13h6', 'M9 17h4']),
       folder: icon(['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z']),
+      star: icon(['M12 3.5l2.7 5.5 6 .9-4.3 4.2 1 6-5.4-2.8-5.4 2.8 1-6L3.3 9.9l6-.9z']),
       code: icon(['M9 18l-6-6 6-6', 'M15 6l6 6-6 6']),
       stop: icon(['M7 7h10v10H7z']),
     }
@@ -1250,6 +1444,10 @@ window.__ModuleLoader__.load({
   border-color: var(--dsw-alias-border-l1);
 }
 .dsc-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsc-tab-dot {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--dsw-alias-brand-primary);
+}
 .dsc-tab-close {
   display: inline-flex; align-items: center; justify-content: center;
   width: 16px; height: 16px; border: 0; border-radius: 4px;
@@ -1605,6 +1803,22 @@ window.__ModuleLoader__.load({
 }
 .dsc-menu-check { flex: none; display: inline-flex; color: var(--dsw-alias-brand-primary); }
 .dsc-menu-check svg { width: 13px; height: 13px; }
+.dsc-menu-row { display: flex; align-items: center; gap: 2px; border-radius: 7px; }
+.dsc-menu-row:hover, .dsc-menu-row.is-active { background: var(--dsw-alias-bg-layer-2); }
+.dsc-menu-row .dsc-menu-item { flex: 1 1 auto; min-width: 0; border-radius: 7px 0 0 7px; }
+.dsc-menu-row .dsc-menu-item:hover, .dsc-menu-row .dsc-menu-item.is-active { background: transparent; }
+.dsc-menu-pin {
+  flex: none; width: 24px; height: 24px; padding: 0; margin-right: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--dsw-alias-label-secondary); cursor: pointer; opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+.dsc-menu-pin svg { width: 12px; height: 12px; }
+.dsc-menu-pin.is-on { opacity: 1; color: var(--dsw-alias-brand-primary); }
+.dsc-menu-pin.is-on svg { fill: currentColor; }
+.dsc-menu-row:hover .dsc-menu-pin { opacity: 1; }
+.dsc-menu-pin:hover { background: var(--dsw-alias-bg-layer-1); }
 .dsc-menu-sub { font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .dsc-menu-effort {
   position: sticky; bottom: -4px;
@@ -1639,6 +1853,21 @@ window.__ModuleLoader__.load({
   border: 1px solid var(--dsw-alias-border-l1);
 }
 .dsc-attach-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.dsc-attach-file {
+  display: inline-flex; align-items: center; gap: 6px;
+  width: auto; max-width: 220px; height: 34px; padding: 0 6px 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+.dsc-attach-file .dsc-attach-x { position: static; width: 18px; height: 18px; }
+.dsc-attach-glyph { flex: none; display: inline-flex; color: var(--dsw-alias-label-secondary); }
+.dsc-attach-glyph svg { width: 14px; height: 14px; }
+.dsc-attach-name {
+  display: flex; flex-direction: column; min-width: 0;
+  font-size: 11.5px; line-height: 1.3; color: var(--dsw-alias-label-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dsc-attach-size { font-size: 10px; color: var(--dsw-alias-label-secondary); }
 .dsc-attach-x {
   position: absolute; top: 2px; right: 2px;
   display: inline-flex; align-items: center; justify-content: center;
@@ -1730,6 +1959,49 @@ window.__ModuleLoader__.load({
 .dsc-send:not(:disabled):hover { transform: translateY(-1px); filter: brightness(1.06); }
 .dsc-send:not(:disabled):active { transform: translateY(0); }
 .dsc-head-name { font-size: 13.5px; letter-spacing: -0.01em; }
+.dsc-head-switch {
+  display: flex; align-items: center; gap: 3px;
+  max-width: 100%; padding: 0; margin: 0;
+  border: 0; background: transparent; color: inherit;
+  font: inherit; letter-spacing: inherit;
+  -webkit-app-region: no-drag; app-region: no-drag;
+  cursor: pointer; text-align: left;
+}
+.dsc-head-switch-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsc-head-switch-caret { flex: none; display: inline-flex; opacity: 0.55; }
+.dsc-head-switch-caret svg { width: 12px; height: 12px; }
+.dsc-head-switch:hover { color: var(--dsw-alias-label-primary); }
+.dsc-head-switch:hover .dsc-head-switch-caret { opacity: 1; }
+.dsc-switch {
+  position: absolute; left: 12px; right: 12px; top: 52px; z-index: 7;
+  max-height: 300px; overflow-y: auto;
+  padding: 5px;
+  background: var(--dsw-alias-bg-overlay);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.18);
+}
+.dsc-switch-search {
+  width: 100%; padding: 5px 9px; margin-bottom: 3px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 12px; line-height: 18px; outline: none;
+}
+.dsc-switch-search:focus { border-color: var(--dsw-alias-border-l2); }
+.dsc-switch-empty { padding: 10px 9px; font-size: 11.5px; color: var(--dsw-alias-label-secondary); }
+.dsc-switch-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 5px 9px; border: 0; border-radius: 7px;
+  background: transparent; text-align: left; cursor: pointer;
+  color: var(--dsw-alias-label-primary); font: inherit;
+}
+.dsc-switch-item:hover, .dsc-switch-item.is-active { background: var(--dsw-alias-bg-layer-2); }
+.dsc-switch-name {
+  flex: 1 1 auto; min-width: 0; font-size: 12.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dsc-switch-id { flex: none; font-size: 10.5px; color: var(--dsw-alias-label-secondary); }
 .dsc-tab { transition: background 0.12s ease, color 0.12s ease; }
 .dsc-md{min-width:0;overflow-wrap:anywhere;font:var(--dsw-font-markdown-base);color:var(--dsw-alias-label-primary)}.dsc-md strong{font-weight:600}.dsc-md h1{font:var(--dsw-font-markdown-h1);margin:32px 0 16px}.dsc-md h2{font:var(--dsw-font-markdown-h2);margin:32px 0 16px}.dsc-md h3{font:var(--dsw-font-markdown-h3);margin:32px 0 16px}.dsc-md h4{font:var(--dsw-font-markdown-h4);margin:16px 0}.dsc-md :where(h5,h6){font:var(--dsw-font-markdown-base-strong);margin:16px 0}.dsc-md :where(h1,h2,h3,h4,h5,h6) strong{font-weight:inherit}.dsc-md p{margin:16px 0}.dsc-md :where(h4,h5,h6)+:where(ul,ol){margin-top:8px}.dsc-md :where(h4,h5,h6):has(+:where(ul,ol)){margin-bottom:8px}.dsc-md a,.dsc-md .dsc-md-fileLink{color:var(--dsw-alias-link);font-weight:500;transition:box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);position:relative;text-decoration:none;border-left:3px solid rgb(255 255 255 / 0);border-right:3px solid rgb(255 255 255 / 0);border-top:2px solid rgb(255 255 255 / 0);border-bottom:2px solid rgb(255 255 255 / 0);margin-left:-3px;margin-right:-3px}.dsc-md a:focus{outline:none;text-decoration:underline dotted var(--dsw-alias-link);text-underline-offset:3px}@media(hover:hover){.dsc-md a:hover{outline:none;text-decoration:underline dotted var(--dsw-alias-link);text-underline-offset:3px}}.dsc-md a:focus-visible,.dsc-md-fileMention:focus-visible{box-shadow:0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))}.dsc-md-linkIcon{flex:none;width:1.1em;height:1.1em;vertical-align:-.25em;margin-right:5px}.dsc-md :where(ul,ol){margin:16px 0;padding-left:18px}.dsc-md li:not(:first-child){margin-top:6px}.dsc-md li>:where(ul,ol){margin-top:4px}.dsc-md li::marker{line-height:24px;color:var(--dsw-alias-label-secondary)}.dsc-md :where(ul,ol) ol{list-style-position:inside;padding-left:0}.dsc-md :where(ul,ol) ol li p{display:inline}.dsc-md li>p{margin:8px 0}.dsc-md li>*:first-child{margin-top:0}.dsc-md li>*:last-child:not(.md-code-block){margin-bottom:0}.dsc-md hr{display:block;border:none;height:.5px;margin:32px 0;background:var(--dsw-alias-border-l2)}.dsc-md blockquote{border-left:2px solid var(--dsw-alias-label-caption);margin:16px 0 0;padding-left:14px}.dsc-md pre{margin:16px 0;font-family:var(--ds-font-family-code);overflow:auto}.dsc-md :not(pre)>code{display:inline-flex;align-items:center;box-sizing:border-box;font:var(--dsw-font-markdown-code);font-family:var(--ds-font-family-code);font-size:.875em!important;background-color:var(--dsw-alias-markdown-inline-code);border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);padding:0 5px}.dsc-md :where(h1,h2,h3,h4,h5,h6) code{font:inherit;font-family:var(--ds-font-family-code)}.dsc-md .katex-display{max-width:100%;overflow-x:auto;overflow-y:hidden}.dsc-md input[type=checkbox]{margin:0 8px 0 0;accent-color:var(--dsw-alias-label-secondary)}.dsc-md-tableScroll{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}.dsc-md-tableScroll.md-table-wide:focus-visible{overflow-x:scroll;padding-bottom:0}@media(hover:hover){.dsc-md-tableScroll.md-table-wide{overflow-x:hidden;padding-bottom:var(--dsh-scrollbar-width, 5px)}.dsc-md-tableScroll.md-table-wide:hover{overflow-x:scroll;padding-bottom:0}}.dsc-md-tableScroll.md-table-wide:hover{overflow-x:scroll;padding-bottom:0}.dsc-md-tableScroll:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))}.dsc-md-tableScroll table{border-collapse:collapse;width:max-content;max-width:max-content}.dsc-md-tableFill table{width:100%;max-width:none}.dsc-md-tableScroll th{text-align:start;padding:10px 16px;border-bottom:.5px solid var(--dsw-alias-border-l3);border-top:none;font:var(--dsw-font-markdown-table-head);max-width:320px;max-width:min(30vw,320px);min-width:100px}.dsc-md-tableScroll td{padding:10px 16px;border-bottom:.5px solid var(--dsw-alias-border-l2);font:var(--dsw-font-markdown-table);max-width:320px;max-width:min(30vw,320px);min-width:100px}.dsc-md-tableScroll th:first-child,.dsc-md-tableScroll td:first-child{padding-left:0}.dsc-md-tableScroll td:last-child{padding-right:0}.dsc-md-tableScroll table code{font-size:11px}.dsc-md>*:first-child,.dsc-md p:first-child{margin-top:0!important}.dsc-md>*:last-child,.dsc-md p:last-child{margin-bottom:0!important}.dsc-md-imageAlt{color:var(--dsw-alias-label-tertiary);font-style:italic}.dsc-md-image{display:block;width:auto;max-width:100%;height:auto;margin:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-base);object-fit:contain}.dsc-md-fileMention{margin:0;padding:0;border:none;background:none;font:inherit;font-weight:500;color:var(--dsw-alias-link);text-decoration:none;cursor:pointer}.dsc-md-fileLink{max-width:100%;text-align:inherit}.dsc-md-fileMention:focus{outline:none;text-decoration:underline dotted var(--dsw-alias-link);text-underline-offset:3px}@media(hover:hover){.dsc-md-fileMention:hover{outline:none;text-decoration:underline dotted var(--dsw-alias-link);text-underline-offset:3px}}.dsc-md-compact{max-width:100%;font-size:var(--dsh-content-font-size-secondary, 13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary, 0px));color:var(--dsw-alias-label-tertiary)}.dsc-md-compact :is(h1,h2,h3,h4,h5,h6){margin:8px 0 4px;font:inherit;font-weight:600;color:inherit}.dsc-md-compact :is(p,ul,ol,blockquote){margin:4px 0}.dsc-md-compact li:not(:first-child){margin-top:2px}.dsc-md-compact li>p{margin:4px 0}.dsc-md-compact li::marker{line-height:inherit;color:inherit}.dsc-md-compact blockquote{padding-left:8px}.dsc-md-compact hr{margin:8px 0}.dsc-md-compact a,.dsc-md-compact .dsc-md-fileMention{font-weight:inherit;color:inherit;text-decoration:underline dotted}.dsc-md-compact a:focus,.dsc-md-compact .dsc-md-fileMention:focus{text-decoration-color:currentColor}@media(hover:hover){.dsc-md-compact a:hover,.dsc-md-compact .dsc-md-fileMention:hover{text-decoration-color:currentColor}}.dsc-md-compact :not(pre)>code{display:inline;font:inherit;font-family:var(--ds-font-family-code);font-size:1em!important;border-radius:var(--dsw-radius-xs);padding:0 3px;box-decoration-break:clone}.dsc-md.dsc-md-compact .md-code-block{margin:4px 0;color:inherit}.dsc-md-compact .md-code-block>:has(>[data-code-block-banner]){position:static;z-index:auto}.dsc-md-compact pre,.dsc-md-compact pre :is(code,span){color:inherit!important}.dsc-md.dsc-md-compact .dsc-md-tableScroll{width:100%;max-width:100%;margin:4px 0;padding-left:0}.dsc-md.dsc-md-compact .dsc-md-tableScroll>table{z-index:auto}.dsc-md-compact :is(th,td){padding:4px 8px;font:inherit}.dsc-md-compact th{font-weight:600}.dsc-md-compact .katex{font-size:1em}.dsc-md-compact :is(p,h1,h2,h3,h4,h5,h6,ul,ol):has(.katex){overflow-x:auto;overflow-y:hidden;padding-bottom:1px}.dsc-md-compact .katex-display{margin:4px 0}.dsc-md-imageButton{display:inline-block;max-width:100%;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;vertical-align:middle;cursor:zoom-in}.dsc-md-imageButton .dsc-md-image{max-width:min(100%,640px);max-height:360px}.dsc-md-imageButton:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:3px}.dsc-md-previewName{display:block;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .dsc-md-tableScroll th:first-child,
@@ -2325,6 +2597,31 @@ window.__ModuleLoader__.load({
           ) ?? null,
         [modelRows, currentModel],
       )
+      const [pins, setPins] = useState(() => readPins())
+      const [recent, setRecent] = useState(() => readRecent())
+
+      const togglePin = useCallback((row) => {
+        const key = modelKey(row.provider, row.model.id)
+        setPins((previous) => {
+          const next = new Set(previous)
+          if (next.has(key)) next.delete(key)
+          else next.add(key)
+          writeJson(PIN_KEY, [...next])
+          return next
+        })
+      }, [])
+
+      const noteRecent = useCallback((row) => {
+        const key = modelKey(row.provider, row.model.id)
+        setRecent((previous) => {
+          const next = [key, ...previous.filter((item) => item !== key)].slice(0, RECENT_MAX)
+          writeJson(RECENT_KEY, next)
+          return next
+        })
+      }, [])
+
+      const isPinned = (row) => pins.has(modelKey(row.provider, row.model.id))
+
       const filteredGroups = useMemo(() => {
         const query = modelQuery.trim().toLowerCase()
         if (query.length === 0) return modelGroups
@@ -2339,6 +2636,24 @@ window.__ModuleLoader__.load({
           }))
           .filter((group) => group.rows.length > 0)
       }, [modelGroups, modelQuery])
+
+      // Pinned rows float into an always-first group; the rest keep their
+      // provider grouping so the list still reads like the shipped menu.
+      const pinnedRows = useMemo(
+        () => modelRows.filter((row) => pins.has(modelKey(row.provider, row.model.id))),
+        [modelRows, pins],
+      )
+
+      const recentRows = useMemo(() => {
+        const byKey = new Map(modelRows.map((row) => [modelKey(row.provider, row.model.id), row]))
+        const rows = []
+        for (const key of recent) {
+          const row = byKey.get(key)
+          if (row === undefined || pins.has(key)) continue
+          rows.push(row)
+        }
+        return rows
+      }, [modelRows, recent, pins])
 
       const currentLevels = useMemo(
         () => effortLevels(currentRow),
@@ -2428,6 +2743,7 @@ window.__ModuleLoader__.load({
             if (result !== undefined && result !== null && result.ok === false) {
               setError(t('error.model', { message: result.error?.message ?? result.error?.code ?? 'unknown' }))
             } else {
+              noteRecent(row)
               setModelOpen(false)
             }
           } catch (cause) {
@@ -2464,30 +2780,88 @@ window.__ModuleLoader__.load({
         [directory, currentModel, currentEffort, modelBusy],
       )
 
+      const modelRow = (row, pinnedSection) => {
+        const key = `${row.provider}:${row.model.id}`
+        const active =
+          currentModel !== null && currentModel.provider === row.provider && currentModel.model === row.model.id
+        const pinned = isPinned(row)
+        return h(
+          'div',
+          {
+            key: pinnedSection ? `pin:${key}` : key,
+            className: `dsc-menu-row${active ? ' is-active' : ''}${modelBusy ? ' is-busy' : ''}`,
+          },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsc-menu-item',
+              onClick: () => pickModel(row),
+              disabled: modelBusy,
+              title: `${row.provider} / ${row.model.id}`,
+            },
+            h('span', { className: 'dsc-menu-name' }, row.model.label ?? row.model.id),
+            active ? h('span', { className: 'dsc-menu-check' }, ICONS.check) : null,
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: `dsc-menu-pin${pinned ? ' is-on' : ''}`,
+              title: pinned ? t('rail.unpin') : t('rail.pin'),
+              onClick: (event) => {
+                event.stopPropagation()
+                togglePin(row)
+              },
+            },
+            ICONS.star,
+          ),
+        )
+      }
+
       const onPickFiles = useCallback(async (event) => {
         const files = Array.from(event.target.files ?? [])
         if (event.target !== undefined && 'value' in event.target) event.target.value = ''
         if (files.length === 0) return
         const accepted = []
         for (const file of files) {
-          if (!file.type.startsWith('image/')) continue
-          if (file.size > MAX_IMAGE_BYTES) continue
-          try {
-            const dataUrl = await readAsDataUrl(file)
-            const comma = dataUrl.indexOf(',')
-            if (comma < 0) continue
-            accepted.push({
-              id: `${Date.now()}-${accepted.length}-${file.name}`,
-              name: file.name,
-              mediaType: file.type,
-              data: dataUrl.slice(comma + 1),
-              previewUrl: dataUrl,
-            })
-          } catch (cause) {
-            report('readImage', cause)
+          const isImage = typeof file.type === 'string' && file.type.startsWith('image/')
+          if (isImage) {
+            if (file.size > MAX_IMAGE_BYTES) continue
+            try {
+              const dataUrl = await readAsDataUrl(file)
+              const comma = dataUrl.indexOf(',')
+              if (comma < 0) continue
+              accepted.push({
+                kind: 'image',
+                id: `${Date.now()}-${accepted.length}-${file.name}`,
+                name: file.name,
+                mediaType: file.type,
+                data: dataUrl.slice(comma + 1),
+                previewUrl: dataUrl,
+              })
+            } catch (cause) {
+              report('readImage', cause)
+            }
+            continue
           }
+          if (file.size > MAX_FILE_BYTES) {
+            setError(t('error.fileTooLarge', { name: file.name, size: Math.round(MAX_FILE_BYTES / 1024 / 1024) }))
+            continue
+          }
+          if (fileUploadRef === null) {
+            setError(t('error.fileUnsupported'))
+            continue
+          }
+          accepted.push({
+            kind: 'file',
+            id: `${Date.now()}-${accepted.length}-${file.name}`,
+            name: file.name,
+            bytes: file.size,
+            file,
+          })
         }
-        if (accepted.length > 0) setImages((previous) => [...previous, ...accepted].slice(0, MAX_IMAGES))
+        if (accepted.length > 0) setImages((previous) => [...previous, ...accepted].slice(0, MAX_ATTACHMENTS))
       }, [])
 
       const submit = useCallback(async () => {
@@ -2497,8 +2871,35 @@ window.__ModuleLoader__.load({
         setError(null)
         const content = []
         if (text.length > 0) content.push({ type: 'text', text })
-        for (const image of images) {
-          content.push({ type: 'image', mediaType: image.mediaType, data: image.data, name: image.name })
+        try {
+          for (const attachment of images) {
+            if (attachment.kind === 'image') {
+              content.push({
+                type: 'image',
+                mediaType: attachment.mediaType,
+                data: attachment.data,
+                name: attachment.name,
+              })
+              continue
+            }
+            // Files are staged first: the prompt carries the receipt, not bytes.
+            const uploaded = await fileUploadRef.upload(sessionId, attachment.file, attachment.name)
+            if (uploaded === null || uploaded === undefined || uploaded.ok !== true) {
+              setError(
+                t('error.upload', {
+                  name: attachment.name,
+                  message: uploaded?.error?.message ?? 'unknown',
+                }),
+              )
+              setBusy(false)
+              return
+            }
+            content.push({ type: 'file', receiptId: uploaded.value.receiptId })
+          }
+        } catch (cause) {
+          setError(t('error.upload', { message: cause?.message ?? String(cause) }))
+          setBusy(false)
+          return
         }
         try {
           const result = await session.prompt(content, 'queue')
@@ -2514,7 +2915,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(false)
         }
-      }, [draft, images, busy, disabled, session])
+      }, [draft, images, busy, disabled, session, sessionId])
 
       // A fragment of one character is enough to ask the Host; an empty one
       // would scan the whole tree on every `@`, so the local paths answer that.
@@ -2669,22 +3070,50 @@ window.__ModuleLoader__.load({
             ? h(
                 'div',
                 { className: 'dsc-attach-row' },
-                images.map((image) =>
-                  h(
-                    'div',
-                    { className: 'dsc-attach', key: image.id, title: image.name },
-                    h('img', { src: image.previewUrl, alt: image.name, className: 'dsc-attach-img' }),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'dsc-attach-x',
-                        'aria-label': t('rail.removeImage'),
-                        onClick: () => setImages((previous) => previous.filter((item) => item.id !== image.id)),
-                      },
-                      ICONS.close,
-                    ),
-                  ),
+                images.map((attachment) =>
+                  attachment.kind === 'file'
+                    ? h(
+                        'div',
+                        { className: 'dsc-attach dsc-attach-file', key: attachment.id, title: attachment.name },
+                        h('span', { className: 'dsc-attach-glyph', 'aria-hidden': true }, fileGlyph(attachment.name)),
+                        h(
+                          'span',
+                          { className: 'dsc-attach-name' },
+                          attachment.name,
+                          h(
+                            'span',
+                            { className: 'dsc-attach-size' },
+                            attachment.bytes >= 1024 * 1024
+                              ? `${(attachment.bytes / 1024 / 1024).toFixed(1)} MB`
+                              : `${Math.max(1, Math.round(attachment.bytes / 1024))} KB`,
+                          ),
+                        ),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'dsc-attach-x',
+                            'aria-label': t('rail.removeImage'),
+                            onClick: () => setImages((previous) => previous.filter((item) => item.id !== attachment.id)),
+                          },
+                          ICONS.close,
+                        ),
+                      )
+                    : h(
+                        'div',
+                        { className: 'dsc-attach', key: attachment.id, title: attachment.name },
+                        h('img', { src: attachment.previewUrl, alt: attachment.name, className: 'dsc-attach-img' }),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'dsc-attach-x',
+                            'aria-label': t('rail.removeImage'),
+                            onClick: () => setImages((previous) => previous.filter((item) => item.id !== attachment.id)),
+                          },
+                          ICONS.close,
+                        ),
+                      ),
                 ),
               )
             : null,
@@ -2730,7 +3159,7 @@ window.__ModuleLoader__.load({
             onChange,
             onKeyDown,
             onPaste: (event) => {
-              const files = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith('image/'))
+              const files = Array.from(event.clipboardData?.files ?? [])
               if (files.length === 0) return
               event.preventDefault()
               onPickFiles({ target: { files, value: '' } }).catch(() => {})
@@ -2757,7 +3186,7 @@ window.__ModuleLoader__.load({
               h('input', {
                 ref: fileRef,
                 type: 'file',
-                accept: 'image/*',
+                accept: undefined,
                 multiple: true,
                 style: { display: 'none' },
                 onChange: onPickFiles,
@@ -2835,30 +3264,28 @@ window.__ModuleLoader__.load({
               filteredGroups.length === 0
                 ? h('div', { className: 'dsc-menu-empty' }, t('rail.noModelMatch'))
                 : null,
+              pinnedRows.length > 0 && modelQuery.trim().length === 0
+                ? h(
+                    Fragment,
+                    null,
+                    h('div', { className: 'dsc-menu-group' }, t('rail.pinned')),
+                    pinnedRows.map((row) => modelRow(row, true)),
+                )
+                : null,
+              recentRows.length > 0 && modelQuery.trim().length === 0
+                ? h(
+                    Fragment,
+                    null,
+                    h('div', { className: 'dsc-menu-group' }, t('rail.recent')),
+                    recentRows.map((row) => modelRow(row, false)),
+                  )
+                : null,
               filteredGroups.map((group) =>
                 h(
                   Fragment,
                   { key: group.provider },
                   h('div', { className: 'dsc-menu-group' }, group.provider),
-                  group.rows.map((row) => {
-                    const active =
-                      currentModel !== null &&
-                      currentModel.provider === row.provider &&
-                      currentModel.model === row.model.id
-                    return h(
-                      'button',
-                      {
-                        type: 'button',
-                        key: `${row.provider}:${row.model.id}`,
-                        className: `dsc-menu-item${active ? ' is-active' : ''}`,
-                        onClick: () => pickModel(row),
-                        disabled: modelBusy,
-                        title: `${row.provider} / ${row.model.id}`,
-                      },
-                      h('span', { className: 'dsc-menu-name' }, row.model.label ?? row.model.id),
-                      active ? h('span', { className: 'dsc-menu-check' }, ICONS.check) : null,
-                    )
-                  }),
+                  group.rows.map((row) => modelRow(row, false)),
                 ),
               ),
               currentEfforts.length > 0 || currentEffort.length > 0
@@ -3097,6 +3524,13 @@ window.__ModuleLoader__.load({
       const activeSession = activeTab === null ? null : references.get(activeTab.sessionId)?.binding?.session ?? null
       const activeSnapshot = useSnapshot(activeSession)
       const activeRunning = activeSnapshot?.running === true
+      const tabIds = current.tabs.map((tab) => tab.sessionId).join('|')
+      const unread = useUnread(current.active, current.mode === 'panel', tabIds)
+      const [switchOpen, setSwitchOpen] = useState(false)
+      const [switchQuery, setSwitchQuery] = useState('')
+      const switchRows = useSessionChoices(switchOpen, switchQuery)
+      const switchRef = useRef(null)
+      const unreadTotal = Object.values(unread).reduce((sum, value) => sum + value, 0)
 
       const clampX = (value, max) => Math.min(Math.max(value, 8), Math.max(8, max))
       const defaultBall = () => ({
@@ -3194,6 +3628,27 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      useEffect(() => {
+        if (!switchOpen) {
+          setSwitchQuery('')
+          return undefined
+        }
+        const onDown = (event) => {
+          const node = event.target instanceof Node ? event.target : null
+          if (node !== null && switchRef.current !== null && switchRef.current.contains(node)) return
+          setSwitchOpen(false)
+        }
+        const onKey = (event) => {
+          if (event.key === 'Escape') setSwitchOpen(false)
+        }
+        document.addEventListener('pointerdown', onDown, true)
+        document.addEventListener('keydown', onKey, true)
+        return () => {
+          document.removeEventListener('pointerdown', onDown, true)
+          document.removeEventListener('keydown', onKey, true)
+        }
+      }, [switchOpen])
+
       const beginDrag = (event, kind) => {
         if (event.button !== 0) return
         const element = kind === 'ball' ? ballRef.current : panelRef.current
@@ -3274,7 +3729,9 @@ window.__ModuleLoader__.load({
               },
               ICONS.chat,
               activeRunning ? h('span', { className: 'dsc-ball-ring', 'aria-hidden': true }) : null,
-              current.tabs.length > 0 ? h('span', { className: 'dsc-ball-badge' }, String(current.tabs.length)) : null,
+              unreadTotal > 0
+                ? h('span', { className: 'dsc-ball-badge' }, unreadTotal > 99 ? '99+' : String(unreadTotal))
+                : null,
             )
           : h(
               'div',
@@ -3293,7 +3750,18 @@ window.__ModuleLoader__.load({
                   h(
                     'div',
                     { style: { minWidth: 0 } },
-                    h('div', { className: 'dsc-head-name' }, activeTab ? shortTitle(activeTab) : t('rail.title')),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsc-head-name dsc-head-switch',
+                        title: t('dock.switch'),
+                        onPointerDown: (event) => event.stopPropagation(),
+                        onClick: () => setSwitchOpen((open) => !open),
+                      },
+                      h('span', { className: 'dsc-head-switch-label' }, activeTab ? shortTitle(activeTab) : t('rail.title')),
+                      h('span', { className: 'dsc-head-switch-caret', 'aria-hidden': true }, ICONS.chevronDown),
+                    ),
                     h('div', { className: 'dsc-head-sub' }, activeTab ? shortId(activeTab.sessionId) : t('dock.hint')),
                   ),
                 ),
@@ -3346,6 +3814,38 @@ window.__ModuleLoader__.load({
                 ),
               ),
               activeRunning ? h('div', { className: 'dsc-running', 'aria-hidden': true }) : null,
+              switchOpen
+                ? h(
+                    'div',
+                    { ref: switchRef, className: 'dsc-switch' },
+                    h('input', {
+                      className: 'dsc-switch-search',
+                      value: switchQuery,
+                      placeholder: t('dock.switchSearch'),
+                      onChange: (event) => setSwitchQuery(event.target.value),
+                      autoFocus: true,
+                    }),
+                    switchRows.length === 0
+                      ? h('div', { className: 'dsc-switch-empty' }, t('dock.switchEmpty'))
+                      : null,
+                    switchRows.map((row) =>
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          key: row.sessionId,
+                          className: `dsc-switch-item${row.sessionId === current.active ? ' is-active' : ''}`,
+                          onClick: () => {
+                            openSession(row.sessionId, row.title)
+                            setSwitchOpen(false)
+                          },
+                        },
+                        h('span', { className: 'dsc-switch-name' }, row.title.length > 0 ? row.title : shortId(row.sessionId)),
+                        h('span', { className: 'dsc-switch-id' }, shortId(row.sessionId)),
+                      ),
+                    ),
+                  )
+                : null,
               current.tabs.length > 1
                 ? h(
                     'div',
@@ -3361,6 +3861,9 @@ window.__ModuleLoader__.load({
                           tabIndex: 0,
                         },
                         h('span', { className: 'dsc-tab-label' }, shortTitle(tab)),
+                        unread[tab.sessionId] !== undefined
+                          ? h('span', { className: 'dsc-tab-dot', 'aria-label': t('rail.unread') })
+                          : null,
                         h(
                           'button',
                           {
@@ -3414,6 +3917,12 @@ window.__ModuleLoader__.load({
       // alongside it; without them the model seat simply stays hidden.
       ctx.inject(['modelDirectories', 'sessions', 'remote', 'remote.session'], (extra) => {
         modelDirsRef = extra.modelDirectories
+      })
+
+      // Prompt files need a staged receipt; without this service only images
+      // can be attached, which is exactly what the rail did before.
+      ctx.inject(['fileUpload'], (extra) => {
+        fileUploadRef = extra.fileUpload
       })
 
       ctx.effect(

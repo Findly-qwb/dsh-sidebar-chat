@@ -110,6 +110,25 @@ check('tool summaries pick the right field', () => {
   assert(call('read', {}).detail === '', 'empty args')
   assert(api.toolSummary({ name: 'read', arguments: 'not json' }).detail === 'not json', 'raw fallback')
 })
+check('unread: counts replies after the read mark', () => {
+  const src = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const start = src.indexOf('    const lastSeqOf =')
+  const end = src.indexOf('    const openSession = (sessionId, title) => {')
+  const api = new Function(`${src.slice(start, end)}\nreturn { lastSeqOf, countRepliesAfter }`)()
+  const entries = [
+    { event: { type: 'user/message', seq: 1 } },
+    { event: { type: 'assistant/message', seq: 2 } },
+    { event: { type: 'tool/result', seq: 3 } },
+    { event: { type: 'assistant/message', seq: 4 } },
+    { event: { type: 'assistant/message', seq: 6 } },
+  ]
+  assert(api.lastSeqOf(entries) === 6, 'last seq')
+  assert(api.countRepliesAfter(entries, 0) === 3, 'all replies')
+  assert(api.countRepliesAfter(entries, 2) === 2, 'after mark 2')
+  assert(api.countRepliesAfter(entries, 6) === 0, 'all read')
+  assert(api.countRepliesAfter([], 0) === 0, 'empty')
+  assert(api.lastSeqOf([]) === 0, 'empty seq')
+})
 check('toolKind mapping', () => {
   const pairs = [['bash','commands'],['read','read'],['read_image','readImage'],['write','write'],['edit','edit'],['grep','search'],['web_search','webSearch'],['subagent','subagents'],['todo_write','plan'],['ask_user_question','questions'],['present','tools']]
   for (const [wire, kind] of pairs) assert(api.toolKind(wire) === kind, wire + ' → ' + api.toolKind(wire))
